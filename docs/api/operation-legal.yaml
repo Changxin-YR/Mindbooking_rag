@@ -1,0 +1,37 @@
+openapi: 3.0.3
+info:
+  title: Operation and Legal API
+  version: v1.2
+paths:
+  /admin/api/v1/operation/rankings:
+    post:
+      operationId: publish_ranking_snapshot
+      responses: {'201': {description: Ranking snapshot}}
+  /admin/api/v1/operation/editorial-slots:
+    post:
+      operationId: publish_editorial_slot
+      responses: {'201': {description: Editorial placement}}
+  /admin/api/v1/operation/recommendations:
+    post:
+      operationId: create_recommendations
+      responses: {'201': {description: Recommendation scores}}
+  /admin/api/v1/operation/exports:
+    post:
+      operationId: request_export
+      responses: {'202': {description: Export queued}}
+  /admin/api/v1/copyright/dossiers:
+    post:
+      operationId: create_copyright_dossier
+      responses: {'201': {description: Dossier created}}
+  /admin/api/v1/copyright/dossiers/{dossier_id}/rights:
+    post:
+      operationId: add_right_item
+      responses: {'201': {description: Right item created}, '409': {description: Conflicting exclusive right}}
+  /admin/api/v1/copyright/complaints:
+    post:
+      operationId: create_copyright_complaint
+      responses: {'201': {description: Complaint submitted}}
+  /admin/api/v1/legal/cases/{case_id}/holds:
+    post:
+      operationId: create_legal_hold
+      responses: {'201': {description: Active legal hold}}

@@ -1,0 +1,29 @@
+openapi: 3.0.3
+info:
+  title: Author Finance API
+  version: v1.2
+paths:
+  /writer/api/v1/finance/contracts:
+    post:
+      operationId: create_contract
+      responses: {'201': {description: Contract created}}
+  /admin/api/v1/finance/contracts/{contract_id}/approve:
+    post:
+      operationId: approve_contract
+      responses: {'200': {description: Contract approved}, '409': {description: Maker checker failure}}
+  /admin/api/v1/finance/revenue:
+    post:
+      operationId: record_revenue
+      responses: {'201': {description: Revenue recorded}}
+  /admin/api/v1/finance/settlements:
+    post:
+      operationId: create_settlement
+      responses: {'201': {description: Locked settlement}}
+  /writer/api/v1/finance/settlements/{settlement_id}/withdraw:
+    post:
+      operationId: request_withdrawal
+      responses: {'200': {description: Withdrawal requested}, '422': {description: Payout validation failed}}
+  /admin/api/v1/finance/chargebacks:
+    post:
+      operationId: create_chargeback
+      responses: {'201': {description: Chargeback traced to revenue}}

@@ -1,0 +1,46 @@
+openapi: 3.0.3
+info:
+  title: Novel Platform Reader Experience API
+  version: 0.1.0
+paths:
+  /api/v1/books:
+    get:
+      operationId: reader_list_books
+      parameters:
+        - {name: channel, in: query, schema: {type: string}}
+        - {name: category, in: query, schema: {type: string}}
+        - {name: tag, in: query, schema: {type: string}}
+        - {name: lifecycle, in: query, schema: {type: string}}
+        - {name: commercial_policy, in: query, schema: {type: string}}
+        - {name: q, in: query, schema: {type: string}}
+      responses:
+        '200': {description: Public search projection}
+  /api/v1/books/{book_id}/ratings:
+    post:
+      operationId: reader_rate_book
+      parameters:
+        - {name: book_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '201': {description: Rating version created}
+        '422': {description: Rating eligibility or score validation failed}
+  /api/v1/social/follows:
+    post:
+      operationId: reader_follow_target
+      responses:
+        '201': {description: Follow relation accepted}
+    delete:
+      operationId: reader_unfollow_target
+      responses:
+        '204': {description: Follow relation removed}
+  /api/v1/content-corrections:
+    post:
+      operationId: reader_submit_correction
+      responses:
+        '201': {description: Correction report created}
+  /api/v1/accounts/{account_id}/minor-protection:
+    put:
+      operationId: reader_set_minor_protection
+      parameters:
+        - {name: account_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Versioned minor-protection policy}

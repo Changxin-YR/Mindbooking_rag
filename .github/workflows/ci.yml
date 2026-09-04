@@ -26,3 +26,41 @@ jobs:
       - name: Run foundation self-check
         shell: pwsh
         run: ./scripts/validate-foundation.ps1
+
+  backend:
+    name: Backend tests and quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install backend
+        run: python -m pip install -e services/backend pytest ruff mypy
+      - name: Backend quality
+        working-directory: services/backend
+        run: |
+          python -m pytest -q
+          python -m ruff format --check src tests
+          python -m ruff check src tests
+          python -m mypy src
+          alembic upgrade head --sql > migration.sql
+
+  frontend:
+    name: Frontend tests and builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install frontend
+        run: pnpm install --frozen-lockfile
+      - name: Frontend quality
+        run: |
+          pnpm -r test
+          pnpm -r typecheck
+          pnpm -r build

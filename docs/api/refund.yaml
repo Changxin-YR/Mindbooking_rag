@@ -1,0 +1,45 @@
+openapi: 3.0.3
+info:
+  title: Refund API
+  version: v1
+paths:
+  /api/v1/refunds:
+    post:
+      operationId: create_refund
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RefundRequest'}
+      responses:
+        '200':
+          description: Formula-calculated refund and same-source recovery result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RefundResponse'}
+        '422':
+          description: Invalid reference or frozen refund rule rejection
+components:
+  schemas:
+    RefundRequest:
+      type: object
+      additionalProperties: false
+      required: [payment_no, recharge_no, refund_reference]
+      properties:
+        payment_no: {type: string}
+        recharge_no: {type: string}
+        refund_reference: {type: string}
+    RefundResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [payment_no, recharge_no, refund_reference, refundable_cents,
+         recoverable_recharge_coin, recoverable_promo_gift_coin, executed]
+      properties:
+        payment_no: {type: string}
+        recharge_no: {type: string}
+        refund_reference: {type: string}
+        refundable_cents: {type: integer, format: int64}
+        recoverable_recharge_coin: {type: integer, format: int64}
+        recoverable_promo_gift_coin: {type: integer, format: int64}
+        executed: {type: boolean}

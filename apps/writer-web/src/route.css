@@ -1,0 +1,3 @@
+.workspace-route { display: grid; gap: 6px; padding: 20px 0; border-bottom: 1px solid #dce3df; }
+.workspace-route h2, .workspace-route p { margin: 0; }
+.workspace-route p:last-child { color: #7e8c90; font-size: 12px; }

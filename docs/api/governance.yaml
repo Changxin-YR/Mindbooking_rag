@@ -1,0 +1,159 @@
+openapi: 3.0.3
+info:
+  title: Novel Platform Governance API
+  version: 0.1.0
+paths:
+  /api/v1/community/report-cases:
+    post:
+      operationId: submit_report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReportRequest'}
+      responses:
+        '201':
+          description: Aggregated report case
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportCaseResponse'}
+        '409': {description: Reporter already submitted for this content}
+  /api/v1/community/report-cases/{case_id}:
+    get:
+      operationId: get_report_case
+      parameters:
+        - {$ref: '#/components/parameters/CaseId'}
+      responses:
+        '200':
+          description: Reporter-safe report case
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportCaseResponse'}
+        '404': {description: Case not found}
+  /api/v1/support/tickets:
+    post:
+      operationId: create_support_ticket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateTicketRequest'}
+      responses:
+        '201': {description: Ticket created}
+  /api/v1/support/tickets/{ticket_id}/replies:
+    post:
+      operationId: reply_support_ticket
+      parameters:
+        - {$ref: '#/components/parameters/TicketId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReplyRequest'}
+      responses:
+        '200': {description: Reply accepted}
+        '404': {description: Ticket not found}
+  /admin/api/v1/approvals:
+    post:
+      operationId: create_approval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateApprovalRequest'}
+      responses:
+        '201': {description: Approval request created}
+  /admin/api/v1/approvals/{approval_id}/decision:
+    post:
+      operationId: decide_approval
+      parameters:
+        - {$ref: '#/components/parameters/ApprovalId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ApprovalDecisionRequest'}
+      responses:
+        '200': {description: Approval decided}
+        '409': {description: Maker/checker violation or state conflict}
+  /admin/api/v1/risk/signals:
+    post:
+      operationId: observe_risk_signal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ObserveSignalRequest'}
+      responses:
+        '201': {description: Signal observed}
+components:
+  parameters:
+    CaseId: {name: case_id, in: path, required: true, schema: {type: string}}
+    TicketId: {name: ticket_id, in: path, required: true, schema: {type: string}}
+    ApprovalId: {name: approval_id, in: path, required: true, schema: {type: string}}
+  schemas:
+    ReportRequest:
+      type: object
+      additionalProperties: false
+      required: [content_type, content_id, reporter_id, reason]
+      properties:
+        content_type: {type: string}
+        content_id: {type: string}
+        reporter_id: {type: string}
+        reason: {type: string}
+    ReportCaseResponse:
+      type: object
+      additionalProperties: false
+      required: [id, content_type, content_id, status, submissions]
+      properties:
+        id: {type: string}
+        content_type: {type: string}
+        content_id: {type: string}
+        status: {type: string}
+        submissions:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, reason]
+            properties:
+              id: {type: string}
+              reason: {type: string}
+    CreateTicketRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, category, priority]
+      properties:
+        account_id: {type: string}
+        category: {type: string}
+        priority: {type: string, enum: [P0, P1, P2, P3]}
+    ReplyRequest:
+      type: object
+      additionalProperties: false
+      required: [body, author]
+      properties:
+        body: {type: string}
+        author: {type: string, enum: [USER, STAFF]}
+    CreateApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [action, requester_id, critical]
+      properties:
+        action: {type: string}
+        requester_id: {type: string}
+        critical: {type: boolean}
+    ApprovalDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [approver_id, decision]
+      properties:
+        approver_id: {type: string}
+        decision: {type: string, enum: [APPROVE, REJECT]}
+    ObserveSignalRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, signal_type, order_id]
+      properties:
+        account_id: {type: string}
+        signal_type: {type: string}
+        order_id: {type: string}

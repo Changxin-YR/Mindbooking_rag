@@ -38,6 +38,23 @@ export interface ReaderBookSummaryDto {
   visibility: 'PUBLIC' | 'TEMP_OFFLINE' | 'PERMANENT_OFFLINE'
 }
 
+export interface ReaderCatalogItemDto {
+  id: string
+  title: string
+  synopsis: string
+  author_id: string
+  channel: string
+  category: string
+  tags: string[]
+  lifecycle: string
+  visibility: string
+}
+
+export interface ReaderCatalogResponseDto {
+  items: ReaderCatalogItemDto[]
+  total: number
+}
+
 export interface PlatformHealthDto {
   service: string
   status: 'ok' | 'degraded'

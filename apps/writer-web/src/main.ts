@@ -1,9 +1,10 @@
 import { createApp, defineComponent, h, ref } from 'vue'
 import { parseShellState, type ShellState } from './shell-state'
 import './styles.css'
+import './route.css'
 
 const item = (tag: string, className: string, children: Parameters<typeof h>[2] = []) => h(tag, { class: className }, children)
-const link = (label: string, active = false) => h('a', { class: ['side-link', active && 'active'], href: '#', onClick: (event: Event) => event.preventDefault() }, label)
+const link = (label: string, active = false) => h('a', { class: ['side-link', active && 'active'], href: `?view=${encodeURIComponent(label)}` }, label)
 
 function stateView(state: ShellState) {
   const content = {
@@ -19,6 +20,7 @@ function stateView(state: ShellState) {
 const App = defineComponent({
   setup() {
     const state = ref(parseShellState(new URLSearchParams(window.location.search).get('state')))
+    const view = ref(new URLSearchParams(window.location.search).get('view') || '工作台')
     return () => state.value !== 'ready'
       ? stateView(state.value)
       : item('div', 'writer-shell', [
@@ -27,6 +29,7 @@ const App = defineComponent({
             item('header', 'writer-topbar', [item('div', '', [item('p', 'top-kicker', 'WRITER CENTER'), item('h1', '', '作者工作台')]), item('div', 'top-actions', [h('a', { href: '#messages' }, '消息 2'), h('span', { class: 'author-avatar' }, '林')])]),
             item('main', 'writer-main', [
               item('section', 'writer-welcome', [item('div', '', [item('p', 'top-kicker', '今日创作'), item('h2', '', '把想象写成下一章。'), item('p', 'welcome-copy', '作品、草稿与审核进度，都从这里开始。')]), h('a', { class: 'writer-primary', href: '#new-book' }, '创建作品')]),
+              item('section', 'workspace-route', [item('p', 'top-kicker', '当前工作区'), item('h2', '', view.value), item('p', '', view.value === '收益与结算' ? '结算单锁定后才能发起提现，金额以财务域为准。' : view.value === '审核进度' ? '首发审核固定章节版本，发布决定由 StaffAccount 完成。' : '通过业务 API 读取当前范围内的数据。')]),
               item('section', 'writer-stats', [item('article', 'stat-block', [item('span', '', '待处理事项'), item('strong', '', '0'), item('small', '', '当前没有待办')]), item('article', 'stat-block', [item('span', '', '本月新增字数'), item('strong', '', '--'), item('small', '', '接入数据后显示')]), item('article', 'stat-block', [item('span', '', '可结算收益'), item('strong', '', '--'), item('small', '', '以结算单为准')])]),
               item('section', 'writer-grid', [item('article', 'writer-panel', [item('div', 'panel-heading', [item('div', '', [item('p', 'top-kicker', '作品空间'), item('h2', '', '我的作品')]), h('a', { href: '#books' }, '查看全部')]), item('div', 'panel-empty', [item('div', 'empty-line', '＋'), item('h3', '', '还没有作品'), item('p', '', '先创建作品，再开始编辑章节。'), h('a', { href: '#new-book' }, '创建第一本作品 →')])]), item('article', 'writer-panel', [item('div', 'panel-heading', [item('div', '', [item('p', 'top-kicker', '审核工作流'), item('h2', '', '最近审核')]), h('a', { href: '#reviews' }, '查看全部')]), item('div', 'panel-empty compact', [item('div', 'empty-line', '✓'), item('h3', '', '暂无审核记录'), item('p', '', '提交章节后，审核状态会出现在这里。')])])]),
               item('section', 'writer-tip', [item('span', 'tip-index', '01'), item('div', '', [item('h3', '', '写作提醒'), item('p', '', '发布章节会创建固定版本并进入对应审核流程。')]), h('a', { href: '#academy' }, '查看创作指南 →')]),

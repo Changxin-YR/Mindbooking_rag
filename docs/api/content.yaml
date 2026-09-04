@@ -1,0 +1,248 @@
+openapi: 3.0.3
+info:
+  title: Novel Platform Content, Review, Reading and Library API
+  version: 0.1.0
+paths:
+  /writer/api/v1/books:
+    post:
+      operationId: writer_create_book
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBookRequest'
+      responses:
+        '201':
+          description: Book created as private draft
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookResponse'
+  /api/v1/books/{book_id}:
+    get:
+      operationId: reader_get_book
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+      responses:
+        '200':
+          description: Public-safe book view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookResponse'
+  /api/v1/books/{book_id}/chapters/{chapter_id}:
+    get:
+      operationId: reader_get_chapter
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+        - name: chapter_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Public free chapter content
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChapterResponse'
+  /api/v1/books/{book_id}/chapters/{chapter_id}:
+    get:
+      operationId: reader_get_chapter
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+        - name: chapter_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Free published chapter DTO
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChapterResponse'
+        '403':
+          description: Paid chapter requires access
+  /writer/api/v1/books/{book_id}/first-listing-submissions:
+    post:
+      operationId: writer_submit_first_listing
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FirstListingRequest'
+      responses:
+        '201':
+          description: Fixed-version review submission
+  /admin/api/v1/reviews:
+    get:
+      operationId: admin_list_review_submissions
+      responses:
+        '200':
+          description: Review queue
+  /admin/api/v1/reviews/{submission_id}/decisions:
+    post:
+      operationId: admin_decide_review
+      parameters:
+        - name: submission_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionRequest'
+      responses:
+        '201':
+          description: Structured review decision
+  /api/v1/books/{book_id}/progress:
+    get:
+      operationId: reader_get_progress
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: Last and furthest reading progress
+    put:
+      operationId: reader_update_progress
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+        - $ref: '#/components/parameters/AccountId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProgressRequest'
+      responses:
+        '200':
+          description: Updated progress
+        '409':
+          description: Revision conflict
+  /api/v1/bookshelf:
+    get:
+      operationId: reader_list_bookshelf
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: Independent bookshelf entries
+  /api/v1/books/{book_id}/bookshelf:
+    post:
+      operationId: reader_add_bookshelf
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShelfRequest'
+      responses:
+        '201':
+          description: Added bookshelf entry
+    delete:
+      operationId: reader_remove_bookshelf
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '204':
+          description: Removed from bookshelf only
+components:
+  parameters:
+    BookId:
+      name: book_id
+      in: path
+      required: true
+      schema:
+        type: string
+    AccountId:
+      name: account_id
+      in: query
+      required: true
+      schema:
+        type: string
+  schemas:
+    CreateBookRequest:
+      type: object
+      additionalProperties: false
+      required: [author_id, title]
+      properties:
+        author_id: {type: string}
+        title: {type: string}
+        synopsis: {type: string}
+    BookResponse:
+      type: object
+      additionalProperties: false
+      required: [id, title, lifecycle, visibility]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        lifecycle: {type: string}
+        visibility: {type: string}
+    ChapterResponse:
+      type: object
+      additionalProperties: false
+      required: [id, book_id, title, content, commercial_policy, access]
+      properties:
+        id: {type: string}
+        book_id: {type: string}
+        title: {type: string}
+        content: {type: string}
+        commercial_policy: {type: string}
+        access: {type: string}
+    ChapterResponse:
+      type: object
+      additionalProperties: false
+      required: [id, book_id, title, content, commercial_policy, access]
+      properties:
+        id: {type: string}
+        book_id: {type: string}
+        title: {type: string}
+        content: {type: string}
+        commercial_policy: {type: string}
+        access: {type: string}
+    FirstListingRequest:
+      type: object
+      additionalProperties: false
+      required: [fixed_version_ids]
+      properties:
+        fixed_version_ids:
+          type: array
+          items: {type: string}
+    DecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [reviewer_id, decision]
+      properties:
+        reviewer_id: {type: string}
+        decision: {type: string}
+        actor_type: {type: string, default: human}
+    ProgressRequest:
+      type: object
+      additionalProperties: false
+      required: [chapter_id, chapter_number, position, expected_revision, session_id]
+      properties:
+        chapter_id: {type: string}
+        chapter_number: {type: integer, minimum: 1}
+        position: {type: integer, minimum: 0}
+        expected_revision: {type: integer, minimum: 0}
+        session_id: {type: string}
+    ShelfRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id]
+      properties:
+        account_id: {type: string}
+        group_name: {type: string, default: default}

@@ -1,0 +1,3 @@
+.admin-route { display: grid; gap: 6px; padding: 20px 0; border-bottom: 1px solid #dbe4e1; }
+.admin-route h2, .admin-route p { margin: 0; }
+.admin-route p:last-child { color: #809196; font-size: 12px; }

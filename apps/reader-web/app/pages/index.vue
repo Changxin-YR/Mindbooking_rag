@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import type { ReaderCatalogResponseDto } from '@mindbooking/api-types'
+import { catalogPath } from '../../src/catalog'
 import { parseShellState } from '../../src/shell-state'
 
 const route = useRoute()
 const state = computed(() => parseShellState(route.query.state))
+const view = computed(() => String(route.query.view || 'home'))
+const filters = computed(() => ({ q: String(route.query.q || '') }))
+const runtimeConfig = useRuntimeConfig()
+const { data: catalog, pending: catalogPending, error: catalogError } = await useFetch<ReaderCatalogResponseDto>(
+  catalogPath(filters.value, runtimeConfig.public.apiBaseUrl),
+  { server: false, default: () => ({ items: [], total: 0 }) },
+)
 </script>
 
 <template>
@@ -11,11 +20,11 @@ const state = computed(() => parseShellState(route.query.state))
     <header class="reader-header">
       <NuxtLink class="reader-brand" to="/">墨页 <span>MindBook</span></NuxtLink>
       <nav class="reader-nav" aria-label="读者导航">
-        <NuxtLink class="active" to="/">首页</NuxtLink>
-        <a href="#library">书库</a>
-        <a href="#ranking">排行榜</a>
-        <a href="#finished">完本</a>
-        <a href="#free">免费</a>
+        <NuxtLink :class="{ active: view === 'home' }" to="/">首页</NuxtLink>
+        <NuxtLink :class="{ active: view === 'library' }" to="/?view=library#library">书库</NuxtLink>
+        <NuxtLink :class="{ active: view === 'ranking' }" to="/?view=ranking#ranking">排行榜</NuxtLink>
+        <NuxtLink :class="{ active: view === 'finished' }" to="/?view=finished#library">完本</NuxtLink>
+        <NuxtLink :class="{ active: view === 'free' }" to="/?view=free#library">免费</NuxtLink>
       </nav>
       <div class="reader-actions">
         <form class="search-box" action="/" method="get">
@@ -37,6 +46,11 @@ const state = computed(() => parseShellState(route.query.state))
         <div class="hero-note" aria-label="阅读提示"><span>本周热读</span><strong>《长夜微光》</strong><small>第 42 章 · 玄幻连载</small></div>
       </section>
 
+      <section v-if="view !== 'home'" class="reader-section route-section" aria-labelledby="route-title">
+        <div class="section-heading"><div><p class="eyebrow">真实业务入口</p><h2 id="route-title">{{ view === 'library' ? '书库' : view === 'ranking' ? '排行榜' : view === 'finished' ? '完本作品' : '免费阅读' }}</h2></div><a href="/">回到首页 →</a></div>
+        <div class="route-grid"><article class="route-item"><strong>{{ view === 'ranking' ? '算法榜单快照' : '今日可读作品' }}</strong><span>{{ view === 'free' ? '无需购买，打开即读' : '内容、状态与访问权限由后端返回' }}</span></article><article class="route-item"><strong>{{ view === 'finished' ? '完整故事' : '个性化设置' }}</strong><span>{{ view === 'ranking' ? '编辑排序与算法分数分离' : '书架、进度和通知可同步' }}</span></article></div>
+      </section>
+
       <section class="reader-section" aria-labelledby="continue-title">
         <div class="section-heading"><div><p class="eyebrow">只为你保留</p><h2 id="continue-title">继续阅读</h2></div><a href="?state=unauthorized">登录同步书架 →</a></div>
         <article class="continue-row"><div class="book-mark mark-coral">长夜<br />微光</div><div class="continue-info"><h3>《长夜微光》</h3><p>第 41 章 · 灯火照见旧山河</p><div class="progress"><span /></div></div><a class="text-button" href="#read">继续阅读</a></article>
@@ -44,7 +58,12 @@ const state = computed(() => parseShellState(route.query.state))
 
       <section id="library" class="reader-section" aria-labelledby="featured-title">
         <div class="section-heading"><div><p class="eyebrow">编辑精选</p><h2 id="featured-title">今天读什么</h2></div><a href="#library">查看全部 →</a></div>
-        <div class="book-grid"><article class="book-card"><div class="book-mark mark-teal">潮生<br />旧梦</div><div><h3>《潮生旧梦》</h3><p>南枝 · 古言</p><span class="tag">连载中</span></div></article><article class="book-card"><div class="book-mark mark-gold">远山<br />来信</div><div><h3>《远山来信》</h3><p>林渡 · 现实题材</p><span class="tag">完本</span></div></article><article class="book-card"><div class="book-mark mark-blue">星河<br />回响</div><div><h3>《星河回响》</h3><p>闻舟 · 科幻</p><span class="tag">免费</span></div></article></div>
+        <ClientOnly fallback-tag="div" fallback="正在加载公开作品...">
+          <div v-if="catalogPending" class="catalog-state" aria-live="polite">正在加载公开作品...</div>
+          <div v-else-if="catalogError" class="catalog-state error" role="alert">作品目录暂时不可用，请稍后重试。</div>
+          <div v-else-if="!catalog?.items.length" class="catalog-state">暂无符合条件的公开作品。</div>
+          <div v-else class="book-grid"><article v-for="book in catalog.items" :key="book.id" class="book-card"><div class="book-mark mark-teal">{{ book.title.slice(0, 4) }}</div><div><h3>《{{ book.title }}》</h3><p>{{ book.channel }} · {{ book.category || '未分类' }}</p><span class="tag">{{ book.lifecycle === 'COMPLETED' ? '完本' : '连载中' }}</span></div></article></div>
+        </ClientOnly>
       </section>
 
       <section id="ranking" class="reader-section ranking-section" aria-labelledby="ranking-title">

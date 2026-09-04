@@ -1,0 +1,127 @@
+openapi: 3.0.3
+info:
+  title: Wallet and Commerce API
+  version: v1
+paths:
+  /api/v1/wallet:
+    get:
+      operationId: get_wallet
+      parameters:
+        - name: account_id
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Wallet balance projection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WalletResponse'}
+  /api/v1/recharge:
+    post:
+      operationId: create_recharge
+      requestBody:
+        required: true
+        content:
+          application/json:
+              schema: {$ref: '#/components/schemas/RechargeRequest'}
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: {type: string, maxLength: 128}
+      responses:
+        '200':
+          description: Pending payment and server-priced recharge order
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RechargeResponse'}
+  /api/v1/recharge/callback:
+    post:
+      operationId: payment_callback
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PaymentCallbackRequest'}
+      responses:
+        '200':
+          description: Idempotent payment callback result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PaymentCallbackResponse'}
+  /api/v1/purchases:
+    post:
+      operationId: purchase_chapter
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PurchaseRequest'}
+      responses:
+        '200':
+          description: Chapter purchase and permanent entitlement
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PurchaseResponse'}
+components:
+  schemas:
+    RechargeRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, product_code, channel]
+      properties:
+        account_id: {type: string}
+        product_code: {type: string, example: RECHARGE_100}
+        channel: {type: string, example: FAKE}
+    RechargeResponse:
+      type: object
+      additionalProperties: false
+      required: [payment_no, recharge_no, paid_cents, recharge_coin, gift_coin, status]
+      properties:
+        payment_no: {type: string}
+        recharge_no: {type: string}
+        paid_cents: {type: integer, format: int64}
+        recharge_coin: {type: integer, format: int64}
+        gift_coin: {type: integer, format: int64}
+        status: {type: string}
+    PaymentCallbackRequest:
+      type: object
+      additionalProperties: false
+      required: [provider, event_id, payment_no]
+      properties:
+        provider: {type: string}
+        event_id: {type: string}
+        payment_no: {type: string}
+    PaymentCallbackResponse:
+      type: object
+      additionalProperties: false
+      required: [recharge_no, status]
+      properties:
+        recharge_no: {type: string}
+        status: {type: string, enum: [PAID]}
+    WalletResponse:
+      type: object
+      additionalProperties: false
+      required: [account_id, recharge_coin, gift_coin, total_coin]
+      properties:
+        account_id: {type: string}
+        recharge_coin: {type: integer, format: int64}
+        gift_coin: {type: integer, format: int64}
+        total_coin: {type: integer, format: int64}
+    PurchaseRequest:
+      type: object
+      additionalProperties: false
+      required: [account_id, chapter_id]
+      properties:
+        account_id: {type: string}
+        chapter_id: {type: string}
+    PurchaseResponse:
+      type: object
+      additionalProperties: false
+      required: [purchase_no, chapter_id, price_coin, status]
+      properties:
+        purchase_no: {type: string}
+        chapter_id: {type: string}
+        price_coin: {type: integer, format: int64}
+        status: {type: string, enum: [PURCHASED]}
