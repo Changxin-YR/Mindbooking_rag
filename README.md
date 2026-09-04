@@ -1,2 +1,2 @@
-# MindBase
-一个个人知识库的创建和结合AI做的一个伟大尝试
+# MindBooking_rag
+基于国内诸多主流小说平台，结合deepseek_harnesss智能体设计的一个现代化智能阅读与写作平台
