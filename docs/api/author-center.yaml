@@ -1,0 +1,21 @@
+openapi: 3.0.3
+info:
+  title: Novel Platform Author Center API
+  version: v1.2
+paths:
+  /writer/api/v1/authors/{author_id}/writing-stats:
+    post: {operationId: record_author_daily_writing, responses: {'201': {description: Daily writing fact}}}
+  /writer/api/v1/authors/{author_id}/calendar:
+    get: {operationId: list_author_calendar, responses: {'200': {description: Derived writing calendar}}}
+  /admin/api/v1/author-tasks:
+    post: {operationId: create_author_task, responses: {'201': {description: Task definition}}}
+  /writer/api/v1/authors/{author_id}/tasks/{task_id}/progress:
+    post: {operationId: progress_author_task, responses: {'200': {description: Idempotent task progress}}}
+  /admin/api/v1/campaigns:
+    post: {operationId: create_author_campaign, responses: {'201': {description: Operation campaign}}}
+  /writer/api/v1/campaigns/{campaign_id}/enroll:
+    post: {operationId: enroll_author_campaign, responses: {'200': {description: Enrollment result}}}
+  /admin/api/v1/learning:
+    post: {operationId: publish_learning_content, responses: {'201': {description: Safe learning content}}}
+  /writer/api/v1/appeals:
+    post: {operationId: open_author_appeal, responses: {'201': {description: Independent review appeal}}}

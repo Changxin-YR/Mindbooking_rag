@@ -19,6 +19,16 @@ paths:
     post:
       operationId: request_export
       responses: {'202': {description: Export queued}}
+  /admin/api/v1/operation/campaigns:
+    post:
+      operationId: create_operation_campaign
+      responses: {'201': {description: Campaign created}}
+  /admin/api/v1/operation/rewards:
+    post:
+      operationId: grant_operation_reward
+      parameters:
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string}}
+      responses: {'201': {description: Idempotent reward grant}}
   /admin/api/v1/copyright/dossiers:
     post:
       operationId: create_copyright_dossier

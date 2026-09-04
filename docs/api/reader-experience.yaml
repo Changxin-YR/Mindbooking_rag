@@ -3,6 +3,14 @@ info:
   title: Novel Platform Reader Experience API
   version: 0.1.0
 paths:
+  /api/v1/books/{book_id}:
+    get:
+      operationId: reader_get_book_detail
+      parameters:
+        - {name: book_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Public book detail and published chapter summaries}
+        '404': {description: Book is not public or does not exist}
   /api/v1/books:
     get:
       operationId: reader_list_books

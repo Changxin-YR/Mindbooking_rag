@@ -1,6 +1,6 @@
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from novel_platform.modules.operation.application import OperationService
@@ -47,6 +47,22 @@ class RetentionRequest(BaseModel):
     days: int = Field(ge=0)
 
 
+class CampaignRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1)
+    start_date: str = Field(min_length=1)
+    end_date: str = Field(min_length=1)
+
+
+class RewardRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject_id: str = Field(min_length=1)
+    reward_type: str = Field(min_length=1)
+    amount: int = Field(gt=0)
+
+
 def build_operation_router(service: OperationService) -> APIRouter:
     router = APIRouter(prefix="/admin/api/v1/operation", tags=["operation"])
 
@@ -75,5 +91,28 @@ def build_operation_router(service: OperationService) -> APIRouter:
     @router.post("/retention-policies", status_code=status.HTTP_201_CREATED)
     def retention(payload: RetentionRequest) -> dict[str, object]:
         return asdict(service.set_retention_policy(RetentionPolicy(**payload.model_dump())))
+
+    @router.post("/campaigns", status_code=status.HTTP_201_CREATED)
+    def campaign(payload: CampaignRequest) -> dict[str, object]:
+        try:
+            return asdict(service.create_campaign(**payload.model_dump()))
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    @router.post("/rewards", status_code=status.HTTP_201_CREATED)
+    def reward(
+        payload: RewardRequest,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, object]:
+        if not idempotency_key:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, detail="IDEMPOTENCY_KEY_REQUIRED"
+            )
+        try:
+            return asdict(
+                service.grant_reward(idempotency_key=idempotency_key, **payload.model_dump())
+            )
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     return router

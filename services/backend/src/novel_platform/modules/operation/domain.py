@@ -9,12 +9,36 @@ class RankingKind(StrEnum):
     CAMPAIGN = "CAMPAIGN"
 
 
+class CampaignStatus(StrEnum):
+    UPCOMING = "UPCOMING"
+    ACTIVE = "ACTIVE"
+    ENDED = "ENDED"
+
+
 class RetentionAction(StrEnum):
     DELETE = "DELETE"
     ANONYMIZE = "ANONYMIZE"
     ARCHIVE = "ARCHIVE"
     KEEP = "KEEP"
     DOMAIN_CONTROLLED = "DOMAIN_CONTROLLED"
+
+
+@dataclass(frozen=True, slots=True)
+class Campaign:
+    id: str
+    title: str
+    start_date: str
+    end_date: str
+    status: CampaignStatus = CampaignStatus.ACTIVE
+
+
+@dataclass(frozen=True, slots=True)
+class RewardGrant:
+    id: str
+    subject_id: str
+    reward_type: str
+    amount: int
+    idempotency_key: str
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 from uuid import uuid4
 
 from novel_platform.modules.operation.domain import (
+    Campaign,
     ExportJob,
     OperationJob,
     RankingItem,
@@ -8,6 +9,7 @@ from novel_platform.modules.operation.domain import (
     Recommendation,
     RetentionAction,
     RetentionPolicy,
+    RewardGrant,
 )
 
 
@@ -23,6 +25,9 @@ class OperationService:
         self.exports: dict[str, ExportJob] = {}
         self.policies: dict[str, RetentionPolicy] = {}
         self.legal_holds: set[str] = set()
+        self.campaigns: dict[str, Campaign] = {}
+        self.campaign_enrollments: set[tuple[str, str]] = set()
+        self.rewards: dict[str, RewardGrant] = {}
 
     def publish_ranking(
         self, book_ids: list[str], kind: RankingKind, scores: list[int], snapshot_id: str
@@ -86,3 +91,31 @@ class OperationService:
         return self.policies.get(
             resource_type, RetentionPolicy(resource_type, RetentionAction.DOMAIN_CONTROLLED, 0)
         ).action
+
+    def create_campaign(self, title: str, start_date: str, end_date: str) -> Campaign:
+        if not title.strip() or not start_date.strip() or not end_date.strip():
+            raise ValueError("CAMPAIGN_INVALID")
+        campaign = Campaign(_id("CAMP"), title.strip(), start_date, end_date)
+        self.campaigns[campaign.id] = campaign
+        return campaign
+
+    def enroll_campaign(self, account_id: str, campaign_id: str) -> bool:
+        if campaign_id not in self.campaigns:
+            raise KeyError(campaign_id)
+        enrollment = (account_id, campaign_id)
+        if enrollment in self.campaign_enrollments:
+            return False
+        self.campaign_enrollments.add(enrollment)
+        return True
+
+    def grant_reward(
+        self, subject_id: str, reward_type: str, amount: int, idempotency_key: str
+    ) -> RewardGrant:
+        if amount <= 0 or not idempotency_key.strip():
+            raise ValueError("REWARD_INVALID")
+        existing = self.rewards.get(idempotency_key)
+        if existing is not None:
+            return existing
+        grant = RewardGrant(_id("REWARD"), subject_id, reward_type, amount, idempotency_key)
+        self.rewards[idempotency_key] = grant
+        return grant

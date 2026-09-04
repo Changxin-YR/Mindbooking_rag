@@ -1,3 +1,21 @@
 .admin-route { display: grid; gap: 6px; padding: 20px 0; border-bottom: 1px solid #dbe4e1; }
 .admin-route h2, .admin-route p { margin: 0; }
 .admin-route p:last-child { color: #809196; font-size: 12px; }
+.admin-card { display: grid; gap: 20px; padding: 24px; margin-top: 28px; border-top: 2px solid #c8dad4; background: #fff; }
+.admin-card h2 { margin: 0; font-size: 20px; }
+.admin-list { display: grid; gap: 1px; padding: 0; margin: 0; list-style: none; }
+.admin-list li, .admin-list > div { display: grid; grid-template-columns: 1fr auto auto; gap: 14px; align-items: center; min-height: 54px; padding: 0 4px; border-bottom: 1px solid #edf0ee; }
+.admin-list span, .admin-note, .finance-state span { color: #7d8d91; font-size: 12px; line-height: 1.7; }
+.admin-list a { color: #d8795e; font-size: 12px; }
+.admin-inline-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.admin-inline-form input { min-width: 0; flex: 1; padding: 10px; border: 1px solid #dce4e1; border-radius: 4px; }
+.admin-action { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 15px; border: 0; border-radius: 4px; color: #fff; background: #d8795e; cursor: pointer; font-size: 12px; }
+.secondary-action { display: inline-flex; align-items: center; min-height: 38px; padding: 0 15px; border: 1px solid #cadbd5; border-radius: 4px; color: #4d6c68; font-size: 12px; }
+.user-facts, .metric-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.user-facts > div, .metric-strip > div { display: grid; gap: 10px; padding: 17px; background: #f4f8f6; }
+.user-facts span, .metric-strip span { color: #7d8d91; font-size: 11px; }
+.user-facts strong, .metric-strip strong { font-size: 20px; font-weight: 500; }
+.finance-state { display: grid; gap: 8px; padding: 18px; border-left: 3px solid #d8795e; background: #fff5f1; }
+.static-list { gap: 0; }
+.quick-actions { display: flex; gap: 10px; }
+@media (max-width: 820px) { .admin-list li, .admin-list > div { grid-template-columns: 1fr; gap: 4px; padding: 12px 4px; }.user-facts, .metric-strip { grid-template-columns: 1fr; }.quick-actions, .admin-inline-form { align-items: stretch; flex-direction: column; }.admin-inline-form input, .admin-inline-form button { width: 100%; } }

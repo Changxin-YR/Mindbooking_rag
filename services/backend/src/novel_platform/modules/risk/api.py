@@ -23,6 +23,32 @@ class RiskSignalResponse(BaseModel):
     status: RiskSignalStatus
 
 
+class LoginSignalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    account_id: str = Field(min_length=1)
+    device_id: str = Field(min_length=1)
+    browser: str = Field(min_length=1)
+    operating_system: str = Field(min_length=1)
+    ip: str = Field(min_length=1)
+    region: str = Field(min_length=1)
+    user_agent: str = Field(min_length=1)
+
+
+class WatchlistRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_type: str = Field(min_length=1)
+    target_value: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    case_id: str = Field(min_length=1)
+
+
+class WatchlistReleaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1)
+    evidence_id: str = Field(min_length=1)
+    case_id: str = Field(min_length=1)
+
+
 def build_risk_router(service: RiskService) -> APIRouter:
     router = APIRouter(prefix="/admin/api/v1/risk", tags=["risk"])
 
@@ -42,5 +68,59 @@ def build_risk_router(service: RiskService) -> APIRouter:
             )
         except KeyError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="signal not found") from exc
+
+    @router.post("/login-signals", status_code=status.HTTP_201_CREATED)
+    def login_signal(payload: LoginSignalRequest) -> dict[str, object]:
+        try:
+            signal = service.record_login(**payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        return (
+            signal.__dict__
+            if hasattr(signal, "__dict__")
+            else {
+                "id": signal.id,
+                "account_id": signal.account_id,
+                "device_id": signal.device_id,
+                "browser": signal.browser,
+                "operating_system": signal.operating_system,
+                "ip": signal.ip,
+                "region": signal.region,
+                "user_agent": signal.user_agent,
+                "status": signal.status,
+            }
+        )
+
+    @router.post("/watchlist", status_code=status.HTTP_201_CREATED)
+    def add_watchlist(payload: WatchlistRequest) -> dict[str, object]:
+        try:
+            entry = service.add_watchlist(**payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        return {
+            "id": entry.id,
+            "target_type": entry.target_type,
+            "target_value": entry.target_value,
+            "reason": entry.reason,
+            "case_id": entry.case_id,
+            "status": entry.status,
+        }
+
+    @router.post("/watchlist/{entry_id}/release")
+    def release_watchlist(entry_id: str, payload: WatchlistReleaseRequest) -> dict[str, object]:
+        try:
+            entry = service.release_watchlist(entry_id, **payload.model_dump())
+        except KeyError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail="watchlist entry not found"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        return {
+            "id": entry.id,
+            "status": entry.status,
+            "release_reason": entry.release_reason,
+            "evidence_id": entry.evidence_id,
+        }
 
     return router

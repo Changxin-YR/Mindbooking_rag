@@ -113,3 +113,43 @@ def test_reader_catalog_filters_public_books() -> None:
     assert response.status_code == 200
     assert response.json()["total"] == 1
     assert response.json()["items"][0]["title"] == "玄幻新书"
+
+
+def test_reader_book_detail_returns_only_public_metadata() -> None:
+    client = TestClient(create_app())
+    book = client.post(
+        "/writer/api/v1/books",
+        json={"author_id": "author-1", "title": "公开详情", "synopsis": "简介"},
+    )
+    assert book.status_code == 201
+    book_id = book.json()["id"]
+    assert client.get(f"/api/v1/books/{book_id}").status_code == 404
+
+    volume = client.post(
+        f"/writer/api/v1/books/{book_id}/volumes", json={"number": 1, "title": "第一卷"}
+    )
+    chapter = client.post(
+        f"/writer/api/v1/volumes/{volume.json()['id']}/chapters",
+        json={"number": 1, "title": "第一章", "commercial_policy": "FREE"},
+    )
+    draft = client.post(
+        f"/writer/api/v1/chapters/{chapter.json()['id']}/drafts", json={"content": "正文"}
+    )
+    version = client.post(
+        f"/writer/api/v1/chapters/{chapter.json()['id']}/versions",
+        json={"snapshot_id": draft.json()["id"]},
+    )
+    submission = client.post(
+        f"/writer/api/v1/books/{book_id}/first-listing-submissions",
+        json={"fixed_version_ids": [version.json()["id"]]},
+    )
+    client.post(
+        f"/admin/api/v1/reviews/{submission.json()['id']}/decisions",
+        json={"reviewer_id": "staff-1", "decision": "APPROVE"},
+    )
+    detail = client.get(f"/api/v1/books/{book_id}")
+    assert detail.status_code == 200
+    assert detail.json()["title"] == "公开详情"
+    assert detail.json()["chapters"] == [
+        {"id": chapter.json()["id"], "number": 1, "title": "第一章", "commercial_policy": "FREE"}
+    ]

@@ -11,6 +11,7 @@ class CreateTicketRequest(BaseModel):
     account_id: str = Field(min_length=1)
     category: str = Field(min_length=1)
     priority: SupportPriority
+    description: str = Field(min_length=1)
 
 
 class ReplyRequest(BaseModel):
@@ -35,7 +36,9 @@ def build_support_router(service: SupportService) -> APIRouter:
 
     @router.post("/tickets", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
     def create_ticket(payload: CreateTicketRequest) -> TicketResponse:
-        ticket = service.open_ticket(payload.account_id, payload.category, payload.priority)
+        ticket = service.open_ticket(
+            payload.account_id, payload.category, payload.priority, payload.description
+        )
         return TicketResponse.model_validate(ticket, from_attributes=True)
 
     @router.post("/tickets/{ticket_id}/resolve", response_model=TicketResponse)

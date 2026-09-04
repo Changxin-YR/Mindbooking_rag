@@ -43,6 +43,25 @@ class PlatformApplication:
         self._require_staff(staff_id)
         self.repository.grant_permission(Permission.create(staff_id, permission))
 
+    def change_staff_status(self, staff_id: str, status: StaffStatus) -> StaffResult:
+        staff = self._require_staff(staff_id)
+        allowed = {
+            StaffStatus.PENDING_ACTIVATION: {StaffStatus.ACTIVE, StaffStatus.DISABLED},
+            StaffStatus.ACTIVE: {
+                StaffStatus.LOCKED,
+                StaffStatus.DISABLED,
+                StaffStatus.OFFBOARDED,
+            },
+            StaffStatus.LOCKED: {StaffStatus.ACTIVE, StaffStatus.DISABLED, StaffStatus.OFFBOARDED},
+            StaffStatus.DISABLED: {StaffStatus.ACTIVE, StaffStatus.OFFBOARDED},
+            StaffStatus.OFFBOARDED: set(),
+        }
+        if status is staff.status:
+            return self._result(staff)
+        if status not in allowed[staff.status]:
+            raise ValueError("STAFF_STATUS_TRANSITION_INVALID")
+        return self._result(self.repository.update_staff_status(staff_id, status))
+
     def grant_data_scope(self, staff_id: str, scope_type: str, scope_value: str) -> None:
         self._require_staff(staff_id)
         self.repository.grant_data_scope(DataScope.create(staff_id, scope_type, scope_value))

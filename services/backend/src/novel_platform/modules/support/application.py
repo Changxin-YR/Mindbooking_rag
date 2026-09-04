@@ -13,11 +13,17 @@ class SupportService:
         self._tickets: dict[str, SupportTicket] = {}
 
     def open_ticket(
-        self, account_id: str, category: str, priority: SupportPriority
+        self, account_id: str, category: str, priority: SupportPriority, description: str = ""
     ) -> SupportTicket:
         ticket = SupportTicket(
             id=f"TKT_{uuid4().hex}", account_id=account_id, category=category, priority=priority
         )
+        if description:
+            ticket.messages.append(
+                SupportMessage(
+                    id=f"MSG_{uuid4().hex}", ticket_id=ticket.id, author="USER", body=description
+                )
+            )
         self._tickets[ticket.id] = ticket
         return ticket
 

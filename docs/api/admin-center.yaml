@@ -1,0 +1,16 @@
+openapi: 3.0.3
+info:
+  title: Novel Platform Admin Center API
+  version: v1.2
+paths:
+  /admin/api/v1/review-rules:
+    get: {operationId: list_review_rules, responses: {'200': {description: Versioned rule library}}}
+    post: {operationId: create_review_rule, responses: {'201': {description: Rule definition}}}
+  /admin/api/v1/reviewer-quality:
+    post: {operationId: record_reviewer_quality, responses: {'201': {description: Structured quality metrics}}}
+  /admin/api/v1/author-alerts:
+    post: {operationId: create_author_alert, responses: {'201': {description: Business-level author alert}}}
+  /admin/api/v1/user-360:
+    post: {operationId: query_masked_user_360, responses: {'200': {description: Permission-masked query view}}}
+  /admin/api/v1/support/dashboard:
+    get: {operationId: get_support_dashboard, responses: {'200': {description: Support and CSAT read model}}}

@@ -1,13 +1,15 @@
 from threading import RLock
 from typing import Protocol
 
-from novel_platform.modules.platform.domain import DataScope, Permission, StaffAccount
+from novel_platform.modules.platform.domain import DataScope, Permission, StaffAccount, StaffStatus
 
 
 class PlatformRepository(Protocol):
     def create_staff(self, staff: StaffAccount) -> None: ...
 
     def staff(self, staff_id: str) -> StaffAccount | None: ...
+
+    def update_staff_status(self, staff_id: str, status: StaffStatus) -> StaffAccount: ...
 
     def has_employee_code(self, employee_code: str) -> bool: ...
 
@@ -44,6 +46,15 @@ class InMemoryPlatformRepository:
     def has_employee_code(self, employee_code: str) -> bool:
         with self._guard:
             return employee_code in self._employee_codes
+
+    def update_staff_status(self, staff_id: str, status: StaffStatus) -> StaffAccount:
+        with self._guard:
+            staff = self._staff[staff_id]
+            updated = StaffAccount(
+                staff.id, staff.employee_code, staff.department, status, staff.platform_account_id
+            )
+            self._staff[staff_id] = updated
+            return updated
 
     def grant_permission(self, permission: Permission) -> None:
         with self._guard:

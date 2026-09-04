@@ -1,0 +1,6 @@
+<script setup lang="ts">
+const runtimeConfig = useRuntimeConfig()
+const { data: wallet, pending, error } = await useFetch<{ recharge_coin: number; gift_coin: number; total_coin: number }>(`${runtimeConfig.public.apiBaseUrl}/api/v1/wallet`, { query: { account_id: 'acct-demo' }, server: false })
+</script>
+
+<template><div class="reader-shell"><header class="reader-header"><NuxtLink class="reader-brand" to="/">墨页 <span>MindBook</span></NuxtLink><nav class="reader-nav"><NuxtLink to="/">首页</NuxtLink><NuxtLink to="/library">书架</NuxtLink><NuxtLink class="active" to="/wallet">钱包</NuxtLink><NuxtLink to="/support">客服</NuxtLink></nav><NuxtLink class="login-link" to="/settings">设置</NuxtLink></header><main class="reader-detail-main"><section class="detail-section"><p class="eyebrow">Wallet</p><h1>我的资产</h1><div v-if="pending" class="catalog-state">正在读取资产...</div><div v-else-if="error" class="catalog-state error">钱包暂时不可用。</div><div v-else class="wallet-grid"><div><span>可用充值币</span><strong>{{ wallet?.recharge_coin ?? 0 }}</strong></div><div><span>赠币</span><strong>{{ wallet?.gift_coin ?? 0 }}</strong></div><div><span>总资产</span><strong>{{ wallet?.total_coin ?? 0 }}</strong></div></div><NuxtLink class="primary-button" to="/support">充值遇到问题？联系支持</NuxtLink></section></main></div></template>

@@ -118,3 +118,12 @@ def test_governance_api_uses_explicit_dtos_and_http_semantics() -> None:
         json={"action": "X", "requester_id": "m", "critical": False, "unexpected": True},
     )
     assert extra.status_code == 422
+
+
+def test_support_ticket_accepts_and_stores_user_description() -> None:
+    support = _load("novel_platform.modules.support.application")
+    service = support.SupportService()
+    ticket = service.open_ticket("account-1", "阅读", support.SupportPriority.P2, "章节显示异常")
+
+    assert ticket.messages[0].author == "USER"
+    assert ticket.messages[0].body == "章节显示异常"

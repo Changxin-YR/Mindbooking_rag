@@ -62,7 +62,7 @@ const { data: catalog, pending: catalogPending, error: catalogError } = await us
           <div v-if="catalogPending" class="catalog-state" aria-live="polite">正在加载公开作品...</div>
           <div v-else-if="catalogError" class="catalog-state error" role="alert">作品目录暂时不可用，请稍后重试。</div>
           <div v-else-if="!catalog?.items.length" class="catalog-state">暂无符合条件的公开作品。</div>
-          <div v-else class="book-grid"><article v-for="book in catalog.items" :key="book.id" class="book-card"><div class="book-mark mark-teal">{{ book.title.slice(0, 4) }}</div><div><h3>《{{ book.title }}》</h3><p>{{ book.channel }} · {{ book.category || '未分类' }}</p><span class="tag">{{ book.lifecycle === 'COMPLETED' ? '完本' : '连载中' }}</span></div></article></div>
+          <div v-else class="book-grid"><NuxtLink v-for="book in catalog.items" :key="book.id" class="book-card" :to="`/books/${book.id}`"><div class="book-mark mark-teal">{{ book.title.slice(0, 4) }}</div><div><h3>《{{ book.title }}》</h3><p>{{ book.channel }} · {{ book.category || '未分类' }}</p><span class="tag">{{ book.lifecycle === 'COMPLETED' ? '完本' : '连载中' }}</span></div></NuxtLink></div>
         </ClientOnly>
       </section>
 

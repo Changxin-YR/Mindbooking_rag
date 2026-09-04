@@ -1,0 +1,11 @@
+openapi: 3.0.3
+info:
+  title: Novel Platform Risk Center API
+  version: v1.2
+paths:
+  /admin/api/v1/risk/login-signals:
+    post: {operationId: record_login_risk_signal, responses: {'201': {description: Observe-first login signal}}}
+  /admin/api/v1/risk/watchlist:
+    post: {operationId: add_risk_watchlist_entry, responses: {'201': {description: Watchlist entry}}}
+  /admin/api/v1/risk/watchlist/{entry_id}/release:
+    post: {operationId: release_risk_watchlist_entry, responses: {'200': {description: Audited manual release}}}

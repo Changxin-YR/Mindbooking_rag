@@ -7,6 +7,7 @@ from novel_platform.modules.platform.application import (
     PlatformApplication,
     StaffNotFoundError,
 )
+from novel_platform.modules.platform.domain import StaffStatus
 
 
 class StaffRequest(BaseModel):
@@ -36,6 +37,12 @@ class DataScopeRequest(BaseModel):
 
     scope_type: str = Field(min_length=1)
     scope_value: str = Field(min_length=1)
+
+
+class StaffStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: StaffStatus
 
 
 class AccessRequest(BaseModel):
@@ -92,11 +99,30 @@ def build_platform_router(application: PlatformApplication) -> APIRouter:
                 status.HTTP_404_NOT_FOUND,
                 detail={"code": "STAFF_NOT_FOUND", "message": str(exc)},
             ) from exc
+
         except ValueError as exc:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={"code": "INVALID_DATA_SCOPE", "message": str(exc)},
             ) from exc
+
+    @router.post("/platform/staff/{staff_id}/status", response_model=StaffResponse)
+    def change_staff_status(staff_id: str, payload: StaffStatusRequest) -> StaffResponse:
+        try:
+            result = application.change_staff_status(staff_id, payload.status)
+        except StaffNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail={"code": "STAFF_NOT_FOUND", "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        return StaffResponse(
+            id=result.id,
+            employee_code=result.employee_code,
+            department=result.department,
+            status=result.status.value,
+        )
 
     @router.post("/platform/access/check", status_code=status.HTTP_204_NO_CONTENT)
     def check_access(payload: AccessRequest) -> None:

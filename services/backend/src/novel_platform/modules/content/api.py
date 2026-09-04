@@ -26,6 +26,30 @@ class BookResponse(BaseModel):
     visibility: str
 
 
+class ReaderChapterSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    number: int
+    title: str
+    commercial_policy: str
+
+
+class ReaderBookDetailResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    synopsis: str
+    author_id: str
+    channel: str
+    category: str
+    tags: tuple[str, ...]
+    lifecycle: str
+    visibility: str
+    chapters: list[ReaderChapterSummary]
+
+
 class VolumeResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -127,9 +151,39 @@ def build_content_routers(content: ContentService) -> tuple[APIRouter, APIRouter
     admin = APIRouter(prefix="/admin/api/v1", tags=["admin-content"])
     access = ContentAccessService()
 
-    @reader.get("/books/{book_id}", response_model=BookResponse, operation_id="reader_get_book")
-    def reader_get_book(book_id: str) -> BookResponse:
-        return _book_response(content, book_id, public=True)
+    @reader.get(
+        "/books/{book_id}", response_model=ReaderBookDetailResponse, operation_id="reader_get_book"
+    )
+    def reader_get_book(book_id: str) -> ReaderBookDetailResponse:
+        try:
+            book = content.get_book(book_id)
+            if book.visibility.value != "PUBLIC":
+                raise KeyError(book_id)
+            metadata = content.get_book_metadata(book_id, public_only=True)
+            chapters = [
+                ReaderChapterSummary(
+                    id=chapter.id,
+                    number=chapter.number,
+                    title=chapter.title,
+                    commercial_policy=chapter.commercial_policy.value,
+                )
+                for chapter in content.list_chapters(book_id)
+                if chapter.published_version_id is not None
+            ]
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="book not found") from exc
+        return ReaderBookDetailResponse(
+            id=book.id,
+            title=metadata.title,
+            synopsis=metadata.synopsis,
+            author_id=book.author_id,
+            channel=metadata.channel,
+            category=metadata.category,
+            tags=metadata.tags,
+            lifecycle=book.lifecycle.value,
+            visibility=book.visibility.value,
+            chapters=chapters,
+        )
 
     @reader.get(
         "/books/{book_id}/chapters/{chapter_id}",
