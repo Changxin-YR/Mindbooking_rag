@@ -1,0 +1,17 @@
+.worktrees/
+node_modules/
+.pnpm-store/
+dist/
+.nuxt/
+.output/
+coverage/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.env
+.env.*
+!.env.example
+*.pyc
+*.log
