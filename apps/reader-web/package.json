@@ -1,0 +1,21 @@
+{
+  "name": "@mindbooking/reader-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mindbooking/api-client": "workspace:*",
+    "@mindbooking/api-types": "workspace:*",
+    "nuxt": "^4.0.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  }
+}

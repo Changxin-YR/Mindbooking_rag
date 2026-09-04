@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  foundation-config:
+    name: Foundation configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose
+        run: docker compose -f infra/docker-compose.yml --env-file .env.example config --quiet
+
+      - name: Validate app profile
+        run: docker compose -f infra/docker-compose.yml --env-file .env.example --profile apps config --quiet
+
+      - name: Run foundation self-check
+        shell: pwsh
+        run: ./scripts/validate-foundation.ps1

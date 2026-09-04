@@ -1,0 +1,21 @@
+{
+  "name": "@mindbooking/admin-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mindbooking/api-client": "workspace:*",
+    "@mindbooking/api-types": "workspace:*",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,1 @@
+"""Novel platform backend."""
