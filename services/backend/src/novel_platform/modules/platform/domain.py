@@ -49,7 +49,17 @@ class DataScope:
 
     @classmethod
     def create(cls, staff_id: str, scope_type: str, scope_value: str) -> DataScope:
-        if scope_type not in {"global", "department", "resource"}:
+        if scope_type not in {
+            "global",
+            "department",
+            "resource",
+            "OWN",
+            "TEAM",
+            "DEPARTMENT",
+            "ASSIGNED",
+            "ALL",
+            "CUSTOM",
+        }:
             raise ValueError("unsupported data scope type")
         if not scope_value.strip():
             raise ValueError("scope_value is required")

@@ -1,8 +1,12 @@
+from collections.abc import Callable
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import optional_session, require_account_access
+from novel_platform.modules.author.application import AuthorProfileNotFoundError
 from novel_platform.modules.author_center.application import AuthorCenterService
 
 
@@ -67,16 +71,44 @@ class AppealBody(BaseModel):
     reason: str = Field(min_length=1)
 
 
-def build_author_center_router(service: AuthorCenterService) -> tuple[APIRouter, APIRouter]:
+def build_author_center_router(
+    service: AuthorCenterService,
+    *,
+    auth_required: bool = False,
+    account_for_author: Callable[[str], str] | None = None,
+) -> tuple[APIRouter, APIRouter]:
     writer = APIRouter(prefix="/writer/api/v1", tags=["author-center"])
     admin = APIRouter(prefix="/admin/api/v1", tags=["author-center-admin"])
 
+    def require_author(request: Request, author_id: str, session: SessionClaims | None) -> None:
+        if not auth_required:
+            return
+        if account_for_author is None:
+            require_account_access(session, author_id, required=True)
+            return
+        try:
+            account_id = account_for_author(author_id)
+        except AuthorProfileNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="author not found") from exc
+        require_account_access(session, account_id, required=True)
+
     @writer.post("/authors/{author_id}/writing-stats", status_code=status.HTTP_201_CREATED)
-    def writing_stat(author_id: str, payload: WritingStatBody) -> dict[str, object]:
+    def writing_stat(
+        author_id: str,
+        payload: WritingStatBody,
+        request: Request,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_author(request, author_id, session)
         return asdict(service.record_daily_writing(author_id, **payload.model_dump()))
 
     @writer.get("/authors/{author_id}/calendar")
-    def calendar(author_id: str) -> list[dict[str, object]]:
+    def calendar(
+        author_id: str,
+        request: Request,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> list[dict[str, object]]:
+        require_author(request, author_id, session)
         return [asdict(item) for item in service.calendar(author_id)]
 
     @admin.post("/author-tasks", status_code=status.HTTP_201_CREATED)
@@ -84,7 +116,13 @@ def build_author_center_router(service: AuthorCenterService) -> tuple[APIRouter,
         return asdict(service.create_task(**payload.model_dump()))
 
     @writer.post("/authors/{author_id}/tasks/{task_id}/progress")
-    def progress_task(task_id: str, payload: TaskProgressBody) -> dict[str, object]:
+    def progress_task(
+        task_id: str,
+        payload: TaskProgressBody,
+        request: Request,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_author(request, payload.author_id, session)
         try:
             return asdict(service.progress_task(task_id=task_id, **payload.model_dump()))
         except KeyError as exc:
@@ -95,7 +133,13 @@ def build_author_center_router(service: AuthorCenterService) -> tuple[APIRouter,
         return asdict(service.create_campaign(**payload.model_dump()))
 
     @writer.post("/campaigns/{campaign_id}/enroll")
-    def enroll(campaign_id: str, payload: EnrollmentBody) -> dict[str, object]:
+    def enroll(
+        campaign_id: str,
+        payload: EnrollmentBody,
+        request: Request,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_author(request, payload.author_id, session)
         try:
             return {
                 "campaign_id": campaign_id,
@@ -110,7 +154,13 @@ def build_author_center_router(service: AuthorCenterService) -> tuple[APIRouter,
         return asdict(service.publish_learning(**payload.model_dump()))
 
     @writer.post("/learning/{content_id}/progress")
-    def learning_progress(content_id: str, payload: LearningProgressBody) -> dict[str, object]:
+    def learning_progress(
+        content_id: str,
+        payload: LearningProgressBody,
+        request: Request,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_author(request, payload.author_id, session)
         try:
             value = service.mark_learning_progress(content_id=content_id, **payload.model_dump())
         except KeyError as exc:
@@ -126,7 +176,12 @@ def build_author_center_router(service: AuthorCenterService) -> tuple[APIRouter,
         return asdict(service.record_chapter_funnel(book_id, chapter_id, **payload.model_dump()))
 
     @writer.post("/appeals", status_code=status.HTTP_201_CREATED)
-    def appeal(payload: AppealBody) -> dict[str, object]:
+    def appeal(
+        payload: AppealBody,
+        request: Request,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_author(request, payload.author_id, session)
         return asdict(service.open_appeal(**payload.model_dump()))
 
     return writer, admin

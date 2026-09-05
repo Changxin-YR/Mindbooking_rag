@@ -1,5 +1,6 @@
 import importlib.util
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 
 import pytest
 from fastapi import FastAPI
@@ -26,6 +27,14 @@ from novel_platform.modules.platform.repository import InMemoryPlatformRepositor
 
 def test_identity_module_is_present() -> None:
     assert importlib.util.find_spec("novel_platform.modules.iam") is not None
+
+
+def test_identity_document_fingerprint_uses_hmac_not_plain_sha256() -> None:
+    document = "11010119900101001X"
+    assert (
+        identity_document_fingerprint(document, "test-secret")
+        != sha256(document.encode("ascii")).hexdigest()
+    )
 
 
 def test_phone_identity_can_route_between_multiple_accounts() -> None:

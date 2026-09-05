@@ -1,6 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import optional_session, require_account_access
 from novel_platform.modules.reading.application import ReadingService
 from novel_platform.modules.reading.domain import ProgressConflict
 
@@ -34,7 +36,7 @@ def _response(progress: object) -> ProgressResponse:
     return ProgressResponse.model_validate(progress, from_attributes=True)
 
 
-def build_reading_router(service: ReadingService) -> APIRouter:
+def build_reading_router(service: ReadingService, *, auth_required: bool = False) -> APIRouter:
     router = APIRouter(prefix="/api/v1", tags=["reader-reading"])
 
     @router.get(
@@ -42,7 +44,12 @@ def build_reading_router(service: ReadingService) -> APIRouter:
         response_model=ProgressResponse,
         operation_id="reader_get_progress",
     )
-    def get_progress(book_id: str, account_id: str) -> ProgressResponse:
+    def get_progress(
+        book_id: str,
+        account_id: str,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> ProgressResponse:
+        require_account_access(session, account_id, required=auth_required)
         return _response(service.get_progress(account_id, book_id))
 
     @router.put(
@@ -51,8 +58,12 @@ def build_reading_router(service: ReadingService) -> APIRouter:
         operation_id="reader_update_progress",
     )
     def update_progress(
-        book_id: str, account_id: str, payload: ProgressRequest
+        book_id: str,
+        account_id: str,
+        payload: ProgressRequest,
+        session: SessionClaims | None = Depends(optional_session),
     ) -> ProgressResponse:
+        require_account_access(session, account_id, required=auth_required)
         try:
             progress = service.update_progress(
                 account_id,

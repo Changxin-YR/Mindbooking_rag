@@ -51,10 +51,26 @@ class AuthorApplication:
         normalized = normalize_pen_name(pen_name)
         if self.repository.has_pen_name(normalized):
             raise DuplicatePenNameError("pen name has already been used")
-        self.repository.change_pen_name(profile_id, pen_name, normalized)
-        return AuthorProfileResult(
-            profile.id, profile.account_id, profile.pen_name, profile.normalized_pen_name
-        )
+        try:
+            self.repository.change_pen_name(profile_id, pen_name, normalized)
+        except ValueError as exc:
+            raise DuplicatePenNameError("pen name has already been used") from exc
+        updated = self.repository.profile(profile_id)
+        if updated is None:
+            raise AuthorProfileNotFoundError("author profile does not exist")
+        return self._result(updated)
+
+    def account_id_for_profile(self, profile_id: str) -> str:
+        profile = self.repository.profile(profile_id)
+        if profile is None:
+            raise AuthorProfileNotFoundError("author profile does not exist")
+        return profile.account_id
+
+    def profile_for_account(self, account_id: str) -> AuthorProfileResult:
+        profile = self.repository.profile_for_account(account_id)
+        if profile is None:
+            raise AuthorProfileNotFoundError("author profile does not exist")
+        return self._result(profile)
 
     def _result(self, profile: AuthorProfile) -> AuthorProfileResult:
         return AuthorProfileResult(

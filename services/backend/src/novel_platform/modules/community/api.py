@@ -1,6 +1,8 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import optional_session, require_account_access, require_session
 from novel_platform.modules.community.application import CommunityService
 from novel_platform.modules.community.domain import ReportCase
 
@@ -43,13 +45,17 @@ def _response(case: ReportCase) -> ReportCaseResponse:
     )
 
 
-def build_community_router(service: CommunityService) -> APIRouter:
+def build_community_router(service: CommunityService, *, auth_required: bool = False) -> APIRouter:
     router = APIRouter(prefix="/api/v1/community", tags=["community"])
 
     @router.post(
         "/report-cases", response_model=ReportCaseResponse, status_code=status.HTTP_201_CREATED
     )
-    def submit_report(payload: ReportRequest) -> ReportCaseResponse:
+    def submit_report(
+        payload: ReportRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> ReportCaseResponse:
+        require_account_access(session, payload.reporter_id, required=auth_required)
         try:
             return _response(
                 service.submit_report(
@@ -60,9 +66,24 @@ def build_community_router(service: CommunityService) -> APIRouter:
             raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @router.get("/report-cases/{case_id}", response_model=ReportCaseResponse)
-    def get_report_case(case_id: str) -> ReportCaseResponse:
+    def get_report_case(
+        case_id: str,
+        request: Request,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> ReportCaseResponse:
         try:
-            return _response(service.get_case(case_id))
+            case = service.get_case(case_id)
+            if auth_required:
+                claims = require_session(request)
+                if not any(item.reporter_id == claims.account_id for item in case.submissions):
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        detail={
+                            "code": "REPORT_CASE_ACCESS_DENIED",
+                            "message": "report is not owned by account",
+                        },
+                    )
+            return _response(case)
         except KeyError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="report case not found") from exc
 

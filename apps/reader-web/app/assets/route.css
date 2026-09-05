@@ -33,6 +33,7 @@
 .wallet-grid > div { display: grid; gap: 12px; padding: 22px; border: 1px solid #e5e1d8; background: #fff; }
 .wallet-grid span { color: #7b858b; font-size: 12px; }
 .wallet-grid strong { color: #253a45; font-size: 28px; font-weight: 500; }
+.wallet-form { max-width: 420px; margin-top: 26px; }
 .reading-main { max-width: 780px; padding: 54px 24px 90px; margin: auto; }
 .reading-article h1 { margin: 0 0 34px; font-size: 34px; }
 .reading-content { white-space: pre-wrap; color: #3c4b51; font-family: serif; font-size: 18px; line-height: 2.2; }

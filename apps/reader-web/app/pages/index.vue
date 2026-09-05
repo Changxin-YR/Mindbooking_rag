@@ -3,15 +3,21 @@ import { computed } from 'vue'
 import type { ReaderCatalogResponseDto } from '@mindbooking/api-types'
 import { catalogPath } from '../../src/catalog'
 import { parseShellState } from '../../src/shell-state'
+import { loadSession } from '../../src/session'
 
 const route = useRoute()
 const state = computed(() => parseShellState(route.query.state))
 const view = computed(() => String(route.query.view || 'home'))
 const filters = computed(() => ({ q: String(route.query.q || '') }))
 const runtimeConfig = useRuntimeConfig()
+const session = loadSession()
 const { data: catalog, pending: catalogPending, error: catalogError } = await useFetch<ReaderCatalogResponseDto>(
   catalogPath(filters.value, runtimeConfig.public.apiBaseUrl),
   { server: false, default: () => ({ items: [], total: 0 }) },
+)
+const { data: rankings, pending: rankingsPending, error: rankingsError } = await useFetch<Array<{ book_id: string; score: number; rank: number }>>(
+  `${runtimeConfig.public.apiBaseUrl}/api/v1/rankings`,
+  { server: false, default: () => [] },
 )
 </script>
 
@@ -43,7 +49,7 @@ const { data: catalog, pending: catalogPending, error: catalogError } = await us
           <p class="hero-copy">从连载、完本和免费作品中，继续你的阅读。</p>
           <div class="hero-actions"><a class="primary-button" href="#library">进入书库</a><a class="quiet-button" href="#free">看看免费作品</a></div>
         </div>
-        <div class="hero-note" aria-label="阅读提示"><span>本周热读</span><strong>《长夜微光》</strong><small>第 42 章 · 玄幻连载</small></div>
+        <div class="hero-note" aria-label="阅读提示"><span>本周热读</span><strong>{{ catalog?.items[0]?.title ? `《${catalog.items[0].title}》` : '等待作品入库' }}</strong><small>{{ catalog?.items[0] ? `${catalog.items[0].channel} · ${catalog.items[0].lifecycle === 'COMPLETED' ? '完本' : '连载中'}` : '公开作品由内容服务提供' }}</small></div>
       </section>
 
       <section v-if="view !== 'home'" class="reader-section route-section" aria-labelledby="route-title">
@@ -52,8 +58,8 @@ const { data: catalog, pending: catalogPending, error: catalogError } = await us
       </section>
 
       <section class="reader-section" aria-labelledby="continue-title">
-        <div class="section-heading"><div><p class="eyebrow">只为你保留</p><h2 id="continue-title">继续阅读</h2></div><a href="?state=unauthorized">登录同步书架 →</a></div>
-        <article class="continue-row"><div class="book-mark mark-coral">长夜<br />微光</div><div class="continue-info"><h3>《长夜微光》</h3><p>第 41 章 · 灯火照见旧山河</p><div class="progress"><span /></div></div><a class="text-button" href="#read">继续阅读</a></article>
+        <div class="section-heading"><div><p class="eyebrow">只为你保留</p><h2 id="continue-title">继续阅读</h2></div><NuxtLink :to="session ? '/library' : '/settings'">{{ session ? '打开书架 →' : '登录同步书架 →' }}</NuxtLink></div>
+        <div class="catalog-state">{{ session ? '当前暂无可继续阅读的同步进度。' : '登录后同步书架、阅读进度和互动记录。' }}</div>
       </section>
 
       <section id="library" class="reader-section" aria-labelledby="featured-title">
@@ -68,7 +74,7 @@ const { data: catalog, pending: catalogPending, error: catalogError } = await us
 
       <section id="ranking" class="reader-section ranking-section" aria-labelledby="ranking-title">
         <div class="section-heading"><div><p class="eyebrow">实时榜单</p><h2 id="ranking-title">热读上升</h2></div><a href="#ranking">完整榜单 →</a></div>
-        <ol class="ranking-list"><li><b>01</b><span>《人间借火》</span><small>都市 · 更新至 96 章</small></li><li><b>02</b><span>《潮生旧梦》</span><small>古言 · 更新至 71 章</small></li><li><b>03</b><span>《星河回响》</span><small>科幻 · 更新至 38 章</small></li></ol>
+        <div v-if="rankingsPending" class="catalog-state">正在加载榜单...</div><div v-else-if="rankingsError" class="catalog-state error">榜单暂时不可用。</div><div v-else-if="!rankings?.length" class="catalog-state">暂无已发布榜单。</div><ol v-else class="ranking-list"><li v-for="ranking in rankings" :key="ranking.book_id"><b>{{ String(ranking.rank).padStart(2, '0') }}</b><span>{{ ranking.book_id }}</span><small>算法分 {{ ranking.score }}</small></li></ol>
       </section>
     </main>
 

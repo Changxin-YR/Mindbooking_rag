@@ -12,7 +12,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def _created_at() -> sa.Column:
-    return sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP"))
+    return sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.text("CURRENT_TIMESTAMP"),
+    )
 
 
 def upgrade() -> None:
@@ -25,7 +30,10 @@ def upgrade() -> None:
         sa.Column("rank", sa.Integer, nullable=False),
         sa.Column("snapshot_id", sa.String(64), nullable=False),
         _created_at(),
-        sa.CheckConstraint("kind IN ('ALGORITHM', 'RECOMMENDATION_SCORE', 'EDITORIAL', 'CAMPAIGN')", name="ck_ranking_kind"),
+        sa.CheckConstraint(
+            "kind IN ('ALGORITHM', 'RECOMMENDATION_SCORE', 'EDITORIAL', 'CAMPAIGN')",
+            name="ck_ranking_kind",
+        ),
     )
     op.create_table(
         "recommendations",
@@ -57,7 +65,10 @@ def upgrade() -> None:
         sa.Column("action", sa.String(32), nullable=False),
         sa.Column("days", sa.Integer, nullable=False),
         _created_at(),
-        sa.CheckConstraint("action IN ('DELETE', 'ANONYMIZE', 'ARCHIVE', 'KEEP', 'DOMAIN_CONTROLLED')", name="ck_retention_action"),
+        sa.CheckConstraint(
+            "action IN ('DELETE', 'ANONYMIZE', 'ARCHIVE', 'KEEP', 'DOMAIN_CONTROLLED')",
+            name="ck_retention_action",
+        ),
         sa.CheckConstraint("days >= 0", name="ck_retention_days"),
     )
     op.create_table(
@@ -110,5 +121,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for table in ("legal_holds", "legal_cases", "copyright_complaints", "copyright_right_items", "copyright_dossiers", "retention_policies", "export_jobs", "operation_jobs", "recommendations", "ranking_items"):
+    for table in (
+        "legal_holds",
+        "legal_cases",
+        "copyright_complaints",
+        "copyright_right_items",
+        "copyright_dossiers",
+        "retention_policies",
+        "export_jobs",
+        "operation_jobs",
+        "recommendations",
+        "ranking_items",
+    ):
         op.drop_table(table)

@@ -37,7 +37,9 @@ def upgrade() -> None:
         sa.Column("agreement_code", sa.String(64), nullable=False),
         sa.Column("version", sa.String(64), nullable=False),
         _created_at(),
-        sa.UniqueConstraint("account_id", "agreement_code", "version", name="uq_agreement_acceptance"),
+        sa.UniqueConstraint(
+            "account_id", "agreement_code", "version", name="uq_agreement_acceptance"
+        ),
     )
     op.create_table(
         "parameter_versions",

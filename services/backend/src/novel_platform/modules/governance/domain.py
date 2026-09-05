@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 
 
@@ -19,6 +20,16 @@ class ReconciliationStatus(StrEnum):
     OPEN = "OPEN"
     REPAIRED = "REPAIRED"
     CLOSED = "CLOSED"
+
+
+class OutboxStatus(StrEnum):
+    NEW = "NEW"
+    PROCESSING = "PROCESSING"
+    PROCESSED = "PROCESSED"
+    PENDING = "PENDING"
+    CLAIMED = "CLAIMED"
+    FAILED = "FAILED"
+    PUBLISHED = "PUBLISHED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +100,12 @@ class OutboxEvent:
     aggregate_id: str
     payload: dict[str, object]
     attempts: int = 0
+    status: OutboxStatus = OutboxStatus.PENDING
+    available_at: datetime | None = None
+    locked_by: str | None = None
+    locked_at: datetime | None = None
+    last_error: str | None = None
+    processed_at: datetime | None = None
 
 
 @dataclass(slots=True)

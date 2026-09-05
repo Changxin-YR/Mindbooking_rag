@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
+from threading import RLock
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,36 +70,50 @@ def calculate_refund(
 
 SourceLookup = Callable[[str, str], RefundSourceSnapshot]
 AssetRecovery = Callable[[RefundCalculationSnapshot], None]
+AccountLookup = Callable[[str, str], str]
 
 
 class RefundService:
-    def __init__(self, source_lookup: SourceLookup, recover_assets: AssetRecovery) -> None:
+    def __init__(
+        self,
+        source_lookup: SourceLookup,
+        recover_assets: AssetRecovery,
+        account_lookup: AccountLookup | None = None,
+    ) -> None:
         self._source_lookup = source_lookup
         self._recover_assets = recover_assets
+        self._account_lookup = account_lookup
         self._completed: dict[str, RefundCalculationSnapshot] = {}
+        self._lock = RLock()
 
     def refund(
         self, payment_no: str, recharge_no: str, refund_reference: str
     ) -> RefundCalculationSnapshot:
-        for value, name in (
-            (payment_no, "payment_no"),
-            (recharge_no, "recharge_no"),
-            (refund_reference, "refund_reference"),
-        ):
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"{name} is required")
-        previous = self._completed.get(refund_reference)
-        if previous is not None:
-            if (previous.payment_no, previous.recharge_no) != (payment_no, recharge_no):
-                raise ValueError("REFUND_REFERENCE_CONFLICT")
-            return previous
+        with self._lock:
+            for value, name in (
+                (payment_no, "payment_no"),
+                (recharge_no, "recharge_no"),
+                (refund_reference, "refund_reference"),
+            ):
+                if not isinstance(value, str) or not value:
+                    raise ValueError(f"{name} is required")
+            previous = self._completed.get(refund_reference)
+            if previous is not None:
+                if (previous.payment_no, previous.recharge_no) != (payment_no, recharge_no):
+                    raise ValueError("REFUND_REFERENCE_CONFLICT")
+                return previous
 
-        source = self._source_lookup(payment_no, recharge_no)
-        if (source.payment_no, source.recharge_no) != (payment_no, recharge_no):
-            raise ValueError("REFUND_SOURCE_MISMATCH")
-        calculation = calculate_refund(source, refund_reference)
-        if calculation.refundable_cents > 0:
-            calculation = replace(calculation, executed=True)
-            self._recover_assets(calculation)
-        self._completed[refund_reference] = calculation
-        return calculation
+            source = self._source_lookup(payment_no, recharge_no)
+            if (source.payment_no, source.recharge_no) != (payment_no, recharge_no):
+                raise ValueError("REFUND_SOURCE_MISMATCH")
+            calculation = calculate_refund(source, refund_reference)
+            if calculation.refundable_cents > 0:
+                calculation = replace(calculation, executed=True)
+                self._recover_assets(calculation)
+            self._completed[refund_reference] = calculation
+            return calculation
+
+    def account_id_for_refund(self, payment_no: str, recharge_no: str) -> str:
+        if self._account_lookup is None:
+            raise ValueError("REFUND_ACCOUNT_LOOKUP_UNAVAILABLE")
+        return self._account_lookup(payment_no, recharge_no)

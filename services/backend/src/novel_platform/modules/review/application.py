@@ -19,6 +19,7 @@ class ReviewService:
         self.content = content
         self._submissions: dict[str, ReviewSubmission] = {}
         self._decisions: dict[str, ReviewDecisionRecord] = {}
+        self._assignments: dict[str, str] = {}
 
     def submit_first_listing(self, book_id: str, fixed_version_ids: list[str]) -> ReviewSubmission:
         book = self.content.get_book(book_id)
@@ -53,6 +54,27 @@ class ReviewService:
 
     def list_submissions(self) -> list[ReviewSubmission]:
         return list(self._submissions.values())
+
+    def assign_submission(self, submission_id: str, staff_id: str) -> None:
+        if submission_id not in self._submissions:
+            raise KeyError(submission_id)
+        if not staff_id.strip():
+            raise ValueError("REVIEW_ASSIGNEE_REQUIRED")
+        self._assignments[submission_id] = staff_id.strip()
+
+    def list_submissions_for_scope(
+        self, scope_type: str, scope_value: str
+    ) -> list[ReviewSubmission]:
+        normalized_type = scope_type.upper()
+        if normalized_type in {"ALL", "GLOBAL"} and scope_value == "*":
+            return self.list_submissions()
+        if normalized_type not in {"SELF", "ASSIGNED"}:
+            return []
+        return [
+            submission
+            for submission in self._submissions.values()
+            if self._assignments.get(submission.id) == scope_value
+        ]
 
     def decide(
         self,

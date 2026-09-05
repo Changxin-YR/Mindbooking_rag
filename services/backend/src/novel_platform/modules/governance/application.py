@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from novel_platform.modules.governance.domain import (
@@ -5,6 +8,7 @@ from novel_platform.modules.governance.domain import (
     Emergency,
     Invoice,
     OutboxEvent,
+    OutboxStatus,
     ParameterStatus,
     ParameterVersion,
     PaymentCreditPending,
@@ -142,6 +146,136 @@ class GovernanceService:
 
     def outbox_event(self, event_id: str) -> OutboxEvent:
         return self._outbox[event_id]
+
+    def claim_outbox(
+        self,
+        worker_id: str,
+        *,
+        limit: int = 10,
+        lease_seconds: int = 60,
+        now: datetime | None = None,
+    ) -> tuple[OutboxEvent, ...]:
+        if not worker_id.strip() or not 1 <= limit <= 100 or lease_seconds <= 0:
+            raise ValueError("OUTBOX_CLAIM_INVALID")
+        now = now or datetime.now(UTC)
+        claimed: list[OutboxEvent] = []
+        for event in sorted(self._outbox.values(), key=lambda item: item.id):
+            available = event.available_at is None or event.available_at <= now
+            lease_expired = event.locked_at is None or event.locked_at <= now
+            if event.status not in {
+                OutboxStatus.NEW,
+                OutboxStatus.PROCESSING,
+                OutboxStatus.PENDING,
+                OutboxStatus.FAILED,
+                OutboxStatus.CLAIMED,
+            }:
+                continue
+            if not available or not lease_expired:
+                continue
+            claimed_status = (
+                OutboxStatus.PROCESSING
+                if event.status in {OutboxStatus.NEW, OutboxStatus.PROCESSING}
+                else OutboxStatus.CLAIMED
+            )
+            updated = replace(
+                event,
+                status=claimed_status,
+                locked_by=worker_id.strip(),
+                locked_at=now,
+                available_at=now + timedelta(seconds=lease_seconds),
+            )
+            self._outbox[event.id] = updated
+            claimed.append(updated)
+            if len(claimed) == limit:
+                break
+        return tuple(claimed)
+
+    def ack_outbox(
+        self, event_id: str, worker_id: str, *, now: datetime | None = None
+    ) -> OutboxEvent:
+        now = now or datetime.now(UTC)
+        event = self._claimed_outbox(event_id, worker_id, now)
+        processed_status = (
+            OutboxStatus.PROCESSED
+            if event.status is OutboxStatus.PROCESSING
+            else OutboxStatus.PUBLISHED
+        )
+        updated = replace(
+            event,
+            status=processed_status,
+            available_at=None,
+            locked_by=None,
+            locked_at=None,
+            processed_at=now,
+        )
+        self._outbox[event_id] = updated
+        return updated
+
+    def fail_outbox(
+        self,
+        event_id: str,
+        worker_id: str,
+        error: str,
+        *,
+        retry_after_seconds: int = 30,
+        now: datetime | None = None,
+    ) -> OutboxEvent:
+        if not error.strip() or retry_after_seconds <= 0:
+            raise ValueError("OUTBOX_FAILURE_INVALID")
+        now = now or datetime.now(UTC)
+        event = self._claimed_outbox(event_id, worker_id, now)
+        updated = replace(
+            event,
+            attempts=event.attempts + 1,
+            status=OutboxStatus.FAILED,
+            available_at=now + timedelta(seconds=retry_after_seconds),
+            locked_by=None,
+            locked_at=None,
+            last_error=error.strip(),
+        )
+        self._outbox[event_id] = updated
+        return updated
+
+    def _claimed_outbox(
+        self, event_id: str, worker_id: str, now: datetime | None = None
+    ) -> OutboxEvent:
+        if not worker_id.strip():
+            raise ValueError("OUTBOX_WORKER_REQUIRED")
+        event = self._outbox[event_id]
+        if (
+            event.status
+            not in {
+                OutboxStatus.CLAIMED,
+                OutboxStatus.PROCESSING,
+            }
+            or event.locked_by != worker_id.strip()
+        ):
+            raise ValueError("OUTBOX_CLAIM_REQUIRED")
+        if event.available_at is not None and event.available_at <= (now or datetime.now(UTC)):
+            raise ValueError("OUTBOX_CLAIM_REQUIRED")
+        return event
+
+    def dispatch_outbox(
+        self,
+        worker_id: str,
+        publisher: Callable[[OutboxEvent], object],
+        *,
+        limit: int = 10,
+        lease_seconds: int = 60,
+        now: datetime | None = None,
+    ) -> tuple[OutboxEvent, ...]:
+        now = now or datetime.now(UTC)
+        published: list[OutboxEvent] = []
+        for event in self.claim_outbox(
+            worker_id, limit=limit, lease_seconds=lease_seconds, now=now
+        ):
+            try:
+                publisher(event)
+            except Exception as exc:  # noqa: BLE001 - every publisher failure must be retried
+                self.fail_outbox(event.id, worker_id, str(exc) or type(exc).__name__, now=now)
+            else:
+                published.append(self.ack_outbox(event.id, worker_id, now=now))
+        return tuple(published)
 
     def request_invoice(
         self, account_id: str, amount_cents: int, title: str, tax_id: str

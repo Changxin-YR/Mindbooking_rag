@@ -47,6 +47,14 @@ class OperationService:
             items.append(item)
         return items
 
+    def public_rankings(self, kind: RankingKind = RankingKind.ALGORITHM) -> tuple[RankingItem, ...]:
+        return tuple(
+            sorted(
+                (item for item in self.rankings.values() if item.kind is kind),
+                key=lambda item: item.rank,
+            )
+        )
+
     def editorial_slot(self, book_id: str, position: int, snapshot_id: str) -> RankingItem:
         if position < 1:
             raise ValueError("INVALID_EDITORIAL_POSITION")

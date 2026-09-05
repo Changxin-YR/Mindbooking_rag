@@ -24,4 +24,19 @@ describe('api client', () => {
 
     await expect(client.get('/private')).rejects.toEqual(new ApiError(401, 'UNAUTHORIZED', '请登录', 'REQ-1'))
   })
+
+  it('propagates session and idempotency headers for protected writes', async () => {
+    const client = createApiClient({
+      token: 'session-token',
+      fetcher: async (_input, init) => {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer session-token',
+          'Idempotency-Key': 'request-1',
+        })
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      },
+    })
+
+    await expect(client.put('/wallet', { amount: 1 }, { idempotencyKey: 'request-1' })).resolves.toEqual({ ok: true })
+  })
 })

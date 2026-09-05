@@ -1,10 +1,9 @@
 """Create identity, author, and staff/RBAC foundations."""
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-
 
 revision: str = "0002_identity_author_staff"
 down_revision: str | None = "0001_foundation"

@@ -7,6 +7,7 @@ from novel_platform.modules.content.application import ContentService
 from novel_platform.modules.content.domain import BookLifecycle, BookVisibility, CommercialPolicy
 from novel_platform.modules.library.api import build_library_router
 from novel_platform.modules.library.application import EntitlementService, LibraryService
+from novel_platform.modules.membership.domain import AccessMode, ChapterPolicy
 from novel_platform.modules.reading.api import build_reading_router
 from novel_platform.modules.reading.application import ContentAccessService, ReadingService
 from novel_platform.modules.reading.domain import AccessResult, ProgressConflict
@@ -376,3 +377,46 @@ def test_reader_can_read_only_public_free_chapter() -> None:
 
     vip_response = client.get(f"/api/v1/books/{book.id}/chapters/{vip_chapter.id}")
     assert vip_response.status_code == 403
+
+
+def test_writer_cannot_create_vip_chapter_directly() -> None:
+    content = ContentService()
+    app = FastAPI()
+    app.include_router(build_content_routers(content)[1])
+    client = TestClient(app)
+    book = content.create_book("author-1", "Book")
+    volume = content.create_volume(book.id, "Volume 1", 1)
+
+    response = client.post(
+        f"/writer/api/v1/volumes/{volume.id}/chapters",
+        json={"title": "VIP", "commercial_policy": "VIP"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "PLATFORM_COMMERCIAL_POLICY_REQUIRED"
+
+
+def test_staff_commercial_policy_route_uses_platform_configuration_port() -> None:
+    content = ContentService()
+    configured: list[tuple[str, ChapterPolicy]] = []
+    app = FastAPI()
+    app.include_router(
+        build_content_routers(
+            content,
+            configure_commercial_policy=lambda chapter_id, policy: configured.append(
+                (chapter_id, policy)
+            ),
+        )[2]
+    )
+    client = TestClient(app)
+    book = content.create_book("author-1", "Book")
+    volume = content.create_volume(book.id, "Volume 1", 1)
+    chapter = content.create_chapter(volume.id, "Chapter 1", CommercialPolicy.FREE)
+
+    response = client.post(
+        f"/admin/api/v1/chapters/{chapter.id}/commercial-policy",
+        json={"price_coin": 100},
+    )
+
+    assert response.status_code == 200
+    assert configured == [(chapter.id, ChapterPolicy(100, AccessMode.VIP_REQUIRED))]

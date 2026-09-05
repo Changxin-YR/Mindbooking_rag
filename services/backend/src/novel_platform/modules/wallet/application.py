@@ -7,6 +7,7 @@ from novel_platform.modules.wallet.domain import (
     WalletAssetLot,
     WalletBalance,
     WalletEntry,
+    WalletSourceSnapshot,
     require_positive_int,
 )
 
@@ -43,9 +44,15 @@ class WalletService:
             return tuple(self._entries.get(account_id, ()))
 
     def grant_recharge_coin(
-        self, account_id: str, amount: int, reason: str = "RECHARGE"
+        self,
+        account_id: str,
+        amount: int,
+        reason: str = "RECHARGE",
+        source_ref: str | None = None,
     ) -> WalletAssetLot:
-        return self._grant(account_id, AssetType.RECHARGE, amount, "RECHARGE", None, reason)
+        return self._grant(
+            account_id, AssetType.RECHARGE, amount, "RECHARGE", None, reason, source_ref=source_ref
+        )
 
     def grant_gift_coin(
         self,
@@ -54,10 +61,77 @@ class WalletService:
         origin: str,
         expires_at: datetime | None,
         issued_at: datetime | None = None,
+        source_ref: str | None = None,
     ) -> WalletAssetLot:
         return self._grant(
-            account_id, AssetType.GIFT, amount, origin, expires_at, "GIFT_GRANT", issued_at
+            account_id,
+            AssetType.GIFT,
+            amount,
+            origin,
+            expires_at,
+            "GIFT_GRANT",
+            issued_at,
+            source_ref,
         )
+
+    def source_snapshot(
+        self, account_id: str, source_ref: str, now: datetime | None = None
+    ) -> WalletSourceSnapshot:
+        at = now or datetime.now(UTC)
+        with self._lock:
+            lots = [
+                lot
+                for lot in self._lots.values()
+                if lot.account_id == account_id and lot.source_ref == source_ref
+            ]
+            recharge = [lot for lot in lots if lot.asset_type is AssetType.RECHARGE]
+            promo_gifts = [
+                lot for lot in lots if lot.asset_type is AssetType.GIFT and lot.origin == "PROMO"
+            ]
+
+            def issued(lot: WalletAssetLot) -> int:
+                return lot.issued_amount or lot.available_amount
+
+            return WalletSourceSnapshot(
+                sum(issued(lot) - lot.available_amount for lot in recharge),
+                sum(issued(lot) - lot.available_amount for lot in promo_gifts),
+                sum(
+                    lot.available_amount
+                    for lot in promo_gifts
+                    if lot.expires_at is not None and lot.expires_at <= at
+                ),
+                sum(lot.available_amount for lot in recharge),
+                sum(
+                    lot.available_amount
+                    for lot in promo_gifts
+                    if lot.expires_at is None or lot.expires_at > at
+                ),
+            )
+
+    def recover_source_assets(
+        self, account_id: str, source_ref: str, now: datetime | None = None
+    ) -> None:
+        at = now or datetime.now(UTC)
+        with self._lock:
+            lots = [
+                lot
+                for lot in self._lots.values()
+                if lot.account_id == account_id
+                and lot.source_ref == source_ref
+                and lot.available_amount > 0
+                and (
+                    lot.asset_type is AssetType.RECHARGE
+                    or (
+                        lot.asset_type is AssetType.GIFT
+                        and lot.origin == "PROMO"
+                        and (lot.expires_at is None or lot.expires_at > at)
+                    )
+                )
+            ]
+            for lot in lots:
+                amount = lot.available_amount
+                lot.available_amount = 0
+                self._append_entry(account_id, lot.asset_type, -amount, "REFUND_RECOVERY")
 
     def spend(
         self,
@@ -100,6 +174,7 @@ class WalletService:
         expires_at: datetime | None,
         reason: str,
         issued_at: datetime | None = None,
+        source_ref: str | None = None,
     ) -> WalletAssetLot:
         require_positive_int(amount, "amount")
         with self._lock:
@@ -112,6 +187,8 @@ class WalletService:
                 available_amount=amount,
                 issued_at=issued_at or datetime.now(UTC),
                 expires_at=expires_at,
+                source_ref=source_ref,
+                issued_amount=amount,
             )
             self._lots[lot.lot_id] = lot
             self._append_entry(account_id, asset_type, amount, reason)

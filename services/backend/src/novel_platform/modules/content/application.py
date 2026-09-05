@@ -202,6 +202,13 @@ class ContentService:
         except KeyError as exc:
             raise KeyError(f"chapter {chapter_id} not found") from exc
 
+    def set_chapter_commercial_policy(
+        self, chapter_id: str, commercial_policy: CommercialPolicy
+    ) -> Chapter:
+        chapter = self.get_chapter(chapter_id)
+        chapter.commercial_policy = commercial_policy
+        return chapter
+
     def save_draft(
         self,
         chapter_id: str,

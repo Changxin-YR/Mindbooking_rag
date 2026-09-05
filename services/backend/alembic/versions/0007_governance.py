@@ -79,7 +79,9 @@ def upgrade() -> None:
             "status IN ('NEW', 'IN_PROGRESS', 'WAITING_USER', 'WAITING_INTERNAL', 'RESOLVED', 'CLOSED', 'CANCELLED')",
             name="ck_support_ticket_status",
         ),
-        sa.CheckConstraint("priority IN ('P0', 'P1', 'P2', 'P3')", name="ck_support_ticket_priority"),
+        sa.CheckConstraint(
+            "priority IN ('P0', 'P1', 'P2', 'P3')", name="ck_support_ticket_priority"
+        ),
     )
     op.create_table(
         "support_messages",

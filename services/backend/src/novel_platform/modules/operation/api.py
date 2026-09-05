@@ -116,3 +116,13 @@ def build_operation_router(service: OperationService) -> APIRouter:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     return router
+
+
+def build_reader_operation_router(service: OperationService) -> APIRouter:
+    router = APIRouter(prefix="/api/v1", tags=["reader-operation"])
+
+    @router.get("/rankings")
+    def list_public_rankings(kind: RankingKind = RankingKind.ALGORITHM) -> list[dict[str, object]]:
+        return [asdict(item) for item in service.public_rankings(kind)]
+
+    return router

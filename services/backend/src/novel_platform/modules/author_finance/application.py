@@ -1,3 +1,5 @@
+from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from novel_platform.modules.author_finance.domain import (
@@ -5,13 +7,17 @@ from novel_platform.modules.author_finance.domain import (
     Contract,
     ContractStatus,
     ContractVersion,
+    PayoutOrder,
+    PayoutStatus,
     RecoveryClaim,
     RevenueEntry,
     RevenueStatus,
     Settlement,
     SettlementStatus,
     Withdrawal,
+    WithdrawalStatus,
 )
+from novel_platform.modules.payment import PayoutProvider, ProviderEvent
 
 
 def _id(prefix: str) -> str:
@@ -19,7 +25,11 @@ def _id(prefix: str) -> str:
 
 
 class AuthorFinanceService:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        payout_provider: PayoutProvider | None = None,
+        payout_provider_secret: str = "",
+    ) -> None:
         self.contracts: dict[str, Contract] = {}
         self.contract_versions: dict[str, ContractVersion] = {}
         self.revenue: dict[str, RevenueEntry] = {}
@@ -27,6 +37,11 @@ class AuthorFinanceService:
         self.withdrawals: dict[str, Withdrawal] = {}
         self.chargebacks: dict[str, Chargeback] = {}
         self.recovery_claims: dict[str, RecoveryClaim] = {}
+        self.payout_orders: dict[str, PayoutOrder] = {}
+        self._risk_approved_withdrawals: set[str] = set()
+        self._finance_approved_withdrawals: set[str] = set()
+        self.payout_provider = payout_provider
+        self.payout_provider_secret = payout_provider_secret
 
     def create_contract(self, author_id: str, book_id: str, share_bps: int = 7000) -> Contract:
         if not 0 < share_bps <= 10000:
@@ -132,6 +147,94 @@ class AuthorFinanceService:
         withdrawal = Withdrawal(_id("WD"), settlement_id, author_id, amount_cents, payout_method)
         self.withdrawals[withdrawal.id] = withdrawal
         return withdrawal
+
+    def approve_withdrawal_risk(self, withdrawal_id: str, reviewer_id: str) -> Withdrawal:
+        del reviewer_id
+        withdrawal = self.withdrawals[withdrawal_id]
+        if withdrawal.status is not WithdrawalStatus.PENDING:
+            raise ValueError("WITHDRAWAL_NOT_REVIEWABLE")
+        self._risk_approved_withdrawals.add(withdrawal_id)
+        return withdrawal
+
+    def approve_withdrawal_finance(self, withdrawal_id: str, reviewer_id: str) -> PayoutOrder:
+        del reviewer_id
+        withdrawal = self.withdrawals[withdrawal_id]
+        if withdrawal_id not in self._risk_approved_withdrawals:
+            raise ValueError("PAYOUT_REVIEW_REQUIRED")
+        existing = next(
+            (item for item in self.payout_orders.values() if item.withdrawal_id == withdrawal_id),
+            None,
+        )
+        if existing is not None:
+            return existing
+        provider = getattr(self, "payout_provider", None)
+        secret = getattr(self, "payout_provider_secret", "")
+        if provider is None or not secret:
+            raise ValueError("PAYOUT_PROVIDER_NOT_CONFIGURED")
+        self._finance_approved_withdrawals.add(withdrawal_id)
+        payout_no = f"PO-{uuid4().hex}"
+        payout = provider.create_payout(
+            payout_no, withdrawal.amount_cents, "CNY", withdrawal.payout_method
+        )
+        result = PayoutOrder(
+            id=_id("PAYOUT"),
+            withdrawal_id=withdrawal_id,
+            payout_no=payout.payout_no,
+            provider=payout.provider,
+            amount_cents=payout.amount_cents,
+            currency=payout.currency,
+            destination=payout.destination,
+        )
+        self.payout_orders[result.id] = result
+        return result
+
+    def handle_payout_provider_event(
+        self, event: ProviderEvent, *, now: datetime | None = None
+    ) -> PayoutOrder:
+        provider = getattr(self, "payout_provider", None)
+        secret = getattr(self, "payout_provider_secret", "")
+        if provider is None or not secret:
+            raise ValueError("PAYOUT_PROVIDER_NOT_CONFIGURED")
+        if event.event_type != "PAYOUT":
+            raise ValueError("PAYOUT_EVENT_TYPE_INVALID")
+        provider_name = getattr(provider, "provider_name", event.provider)
+        if event.provider != provider_name:
+            raise ValueError("PAYOUT_PROVIDER_MISMATCH")
+        if not event.verify_signature(secret):
+            raise ValueError("PAYOUT_SIGNATURE_INVALID")
+        if event.available_at > (now or datetime.now(UTC)):
+            raise ValueError("PAYOUT_EVENT_NOT_AVAILABLE")
+        payout = next(
+            (item for item in self.payout_orders.values() if item.payout_no == event.reference_id),
+            None,
+        )
+        if payout is None:
+            raise ValueError("PAYOUT_NOT_FOUND")
+        if payout.amount_cents != event.amount_cents or payout.currency != event.currency:
+            raise ValueError("PAYOUT_AMOUNT_MISMATCH")
+        if payout.provider_event_id == event.event_id:
+            return payout
+        if payout.status is PayoutStatus.SUCCESS:
+            raise ValueError("PAYOUT_STATE_CONFLICT")
+        updated = replace(
+            payout,
+            status=PayoutStatus(event.status.value),
+            provider_event_id=event.event_id,
+        )
+        self.payout_orders[payout.id] = updated
+        withdrawal = self.withdrawals[payout.withdrawal_id]
+        self.withdrawals[withdrawal.id] = replace(
+            withdrawal,
+            status=(
+                WithdrawalStatus.PAID
+                if updated.status is PayoutStatus.SUCCESS
+                else WithdrawalStatus.FAILED
+                if updated.status
+                in (PayoutStatus.FAILED, PayoutStatus.REJECTED, PayoutStatus.TIMEOUT)
+                else WithdrawalStatus.PENDING
+            ),
+        )
+        return updated
 
     def chargeback(self, source_ref: str, amount_cents: int) -> Chargeback:
         if amount_cents <= 0:

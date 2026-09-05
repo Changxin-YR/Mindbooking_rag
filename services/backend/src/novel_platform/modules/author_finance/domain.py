@@ -30,6 +30,14 @@ class WithdrawalStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class PayoutStatus(StrEnum):
+    PROCESSING = "PROCESSING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    REJECTED = "REJECTED"
+    TIMEOUT = "TIMEOUT"
+
+
 @dataclass(slots=True)
 class Contract:
     id: str
@@ -77,6 +85,19 @@ class Withdrawal:
     amount_cents: int
     payout_method: str
     status: WithdrawalStatus = WithdrawalStatus.PENDING
+
+
+@dataclass(frozen=True, slots=True)
+class PayoutOrder:
+    id: str
+    withdrawal_id: str
+    payout_no: str
+    provider: str
+    amount_cents: int
+    currency: str
+    destination: str
+    status: PayoutStatus = PayoutStatus.PROCESSING
+    provider_event_id: str | None = None
 
 
 @dataclass(slots=True)

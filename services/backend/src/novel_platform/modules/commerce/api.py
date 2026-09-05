@@ -1,6 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import require_session
 from novel_platform.modules.commerce.refund import RefundCalculationSnapshot, RefundService
 
 
@@ -36,11 +38,32 @@ def _response(snapshot: RefundCalculationSnapshot) -> RefundResponse:
     )
 
 
-def build_refund_router(service: RefundService) -> APIRouter:
+def build_refund_router(service: RefundService, *, auth_required: bool = False) -> APIRouter:
     router = APIRouter(tags=["commerce-refund"])
 
     @router.post("/refunds", response_model=RefundResponse, operation_id="create_refund")
-    def create_refund(payload: RefundRequest) -> RefundResponse:
+    def create_refund(
+        payload: RefundRequest,
+        request: Request,
+    ) -> RefundResponse:
+        if auth_required:
+            claims: SessionClaims = require_session(request)
+            try:
+                if (
+                    service.account_id_for_refund(payload.payment_no, payload.recharge_no)
+                    != claims.account_id
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail={
+                            "code": "ACCOUNT_ACCESS_DENIED",
+                            "message": "refund source is not owned by session",
+                        },
+                    )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422, detail={"code": str(exc), "message": str(exc)}
+                ) from exc
         try:
             snapshot = service.refund(
                 payload.payment_no, payload.recharge_no, payload.refund_reference

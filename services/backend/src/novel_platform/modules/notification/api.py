@@ -1,6 +1,8 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import optional_session, require_account_access
 from novel_platform.modules.notification.application import NotificationService
 from novel_platform.modules.notification.domain import NotificationCategory, NotificationPriority
 
@@ -31,11 +33,17 @@ class NotificationResponse(BaseModel):
     channels: list[str]
 
 
-def build_notification_router(service: NotificationService) -> APIRouter:
+def build_notification_router(
+    service: NotificationService, *, auth_required: bool = False
+) -> APIRouter:
     router = APIRouter(prefix="/api/v1/notifications", tags=["notification"])
 
     @router.post("", response_model=NotificationResponse, status_code=status.HTTP_201_CREATED)
-    def send(payload: SendNotificationRequest) -> NotificationResponse:
+    def send(
+        payload: SendNotificationRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> NotificationResponse:
+        require_account_access(session, payload.account_id, required=auth_required)
         notification = service.send(
             payload.account_id, payload.category, payload.priority, payload.channels
         )
@@ -48,7 +56,11 @@ def build_notification_router(service: NotificationService) -> APIRouter:
         )
 
     @router.put("/marketing-preference", status_code=status.HTTP_204_NO_CONTENT)
-    def set_marketing_preference(payload: MarketingPreferenceRequest) -> None:
+    def set_marketing_preference(
+        payload: MarketingPreferenceRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> None:
+        require_account_access(session, payload.account_id, required=auth_required)
         try:
             service.set_marketing_enabled(payload.account_id, payload.enabled)
         except ValueError as exc:

@@ -5,7 +5,6 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-
 revision: str = "0006_refund"
 down_revision: str | None = "0005_wallet_commerce"
 branch_labels: str | Sequence[str] | None = None
@@ -28,7 +27,12 @@ def upgrade() -> None:
         sa.Column("recoverable_recharge_coin", sa.BigInteger(), nullable=False),
         sa.Column("recoverable_promo_gift_coin", sa.BigInteger(), nullable=False),
         sa.Column("executed", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("refund_reference", name="uq_refund_snapshot_reference"),
         sa.CheckConstraint("refundable_cents >= 0", name="ck_refund_snapshot_nonnegative"),
@@ -42,7 +46,12 @@ def upgrade() -> None:
         sa.Column("recharge_no", sa.String(64), nullable=False),
         sa.Column("snapshot_id", sa.BigInteger(), nullable=False),
         sa.Column("status", sa.String(32), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("refund_no", name="uq_refund_request_no"),
         sa.UniqueConstraint("refund_reference", name="uq_refund_request_reference"),
@@ -55,7 +64,12 @@ def upgrade() -> None:
         sa.Column("recharge_no", sa.String(64), nullable=False),
         sa.Column("refund_reference", sa.String(128), nullable=False),
         sa.Column("status", sa.String(32), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("payment_no", "recharge_no", name="uq_refund_source_lock"),
     )

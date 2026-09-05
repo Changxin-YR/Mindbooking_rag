@@ -1,6 +1,14 @@
-from fastapi import APIRouter, Header, HTTPException, Query
+from datetime import datetime
+from hashlib import sha256
+from hmac import compare_digest
+from hmac import new as hmac_new
+from time import time
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import optional_session, require_account_access
 from novel_platform.modules.commerce.application import CommerceService
 
 
@@ -21,6 +29,8 @@ class RechargeResponse(BaseModel):
     recharge_coin: int
     gift_coin: int
     status: str
+    provider: str | None = None
+    checkout_url: str | None = None
 
 
 class PaymentCallbackRequest(BaseModel):
@@ -36,6 +46,22 @@ class PaymentCallbackResponse(BaseModel):
 
     recharge_no: str
     status: str
+
+
+class PaymentProviderEventRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    event_type: str
+    event_id: str
+    reference_id: str
+    provider_transaction_id: str
+    status: str
+    amount_cents: int
+    currency: str
+    occurred_at: datetime
+    available_at: datetime
+    signature: str
 
 
 class WalletResponse(BaseModel):
@@ -63,11 +89,21 @@ class PurchaseResponse(BaseModel):
     status: str
 
 
-def build_reader_router(commerce: CommerceService) -> APIRouter:
+def build_reader_router(
+    commerce: CommerceService,
+    *,
+    auth_required: bool = False,
+    callback_secret: str = "",
+    callback_max_skew_seconds: int = 300,
+) -> APIRouter:
     router = APIRouter(tags=["wallet", "commerce"])
 
     @router.get("/wallet", response_model=WalletResponse, operation_id="get_wallet")
-    def get_wallet(account_id: str = Query(min_length=1)) -> WalletResponse:
+    def get_wallet(
+        account_id: str = Query(min_length=1),
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> WalletResponse:
+        require_account_access(session, account_id, required=auth_required)
         balance = commerce.wallet.balance(account_id)
         return WalletResponse(
             account_id=account_id,
@@ -80,7 +116,9 @@ def build_reader_router(commerce: CommerceService) -> APIRouter:
     def create_recharge(
         payload: RechargeRequest,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        session: SessionClaims | None = Depends(optional_session),
     ) -> RechargeResponse:
+        require_account_access(session, payload.account_id, required=auth_required)
         try:
             order = commerce.create_recharge(
                 payload.account_id, payload.product_code, payload.channel, idempotency_key
@@ -96,6 +134,43 @@ def build_reader_router(commerce: CommerceService) -> APIRouter:
             recharge_coin=order.recharge_order.recharge_coin,
             gift_coin=order.recharge_order.gift_coin,
             status=order.recharge_order.status,
+            provider=order.provider_checkout.provider if order.provider_checkout else None,
+            checkout_url=order.provider_checkout.checkout_url if order.provider_checkout else None,
+        )
+
+    @router.post(
+        "/recharge/provider-callback",
+        response_model=PaymentCallbackResponse,
+        operation_id="payment_provider_callback",
+    )
+    def payment_provider_callback(
+        payload: PaymentProviderEventRequest,
+    ) -> PaymentCallbackResponse:
+        from novel_platform.modules.payment import ProviderEvent, ProviderStatus
+
+        try:
+            event = ProviderEvent(
+                provider=payload.provider,
+                event_type=payload.event_type,
+                event_id=payload.event_id,
+                reference_id=payload.reference_id,
+                provider_transaction_id=payload.provider_transaction_id,
+                status=ProviderStatus(payload.status),
+                amount_cents=payload.amount_cents,
+                currency=payload.currency,
+                occurred_at=payload.occurred_at,
+                available_at=payload.available_at,
+                signature=payload.signature,
+            )
+            handler = commerce.handle_payment_provider_event
+            recharge_no = handler(event)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422, detail={"code": str(exc), "message": str(exc)}
+            ) from exc
+        return PaymentCallbackResponse(
+            recharge_no=str(recharge_no),
+            status="PAID" if payload.status == "SUCCESS" else payload.status,
         )
 
     @router.post(
@@ -103,7 +178,28 @@ def build_reader_router(commerce: CommerceService) -> APIRouter:
         response_model=PaymentCallbackResponse,
         operation_id="payment_callback",
     )
-    def payment_callback(payload: PaymentCallbackRequest) -> PaymentCallbackResponse:
+    def payment_callback(
+        payload: PaymentCallbackRequest,
+        request: Request,
+        callback_timestamp: str | None = Header(default=None, alias="X-Payment-Timestamp"),
+        callback_signature: str | None = Header(default=None, alias="X-Payment-Signature"),
+    ) -> PaymentCallbackResponse:
+        if not _valid_callback_signature(
+            callback_secret,
+            callback_max_skew_seconds,
+            payload.provider,
+            payload.event_id,
+            payload.payment_no,
+            callback_timestamp,
+            callback_signature,
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "PAYMENT_CALLBACK_UNAUTHORIZED",
+                    "message": "valid payment callback signature required",
+                },
+            )
         try:
             recharge_no = commerce.handle_payment_callback(
                 payload.provider, payload.event_id, payload.payment_no
@@ -115,7 +211,11 @@ def build_reader_router(commerce: CommerceService) -> APIRouter:
         return PaymentCallbackResponse(recharge_no=recharge_no, status="PAID")
 
     @router.post("/purchases", response_model=PurchaseResponse, operation_id="purchase_chapter")
-    def purchase_chapter(payload: PurchaseRequest) -> PurchaseResponse:
+    def purchase_chapter(
+        payload: PurchaseRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> PurchaseResponse:
+        require_account_access(session, payload.account_id, required=auth_required)
         try:
             order = commerce.purchase_chapter(payload.account_id, payload.chapter_id)
         except ValueError as exc:
@@ -130,3 +230,31 @@ def build_reader_router(commerce: CommerceService) -> APIRouter:
         )
 
     return router
+
+
+def payment_callback_signature(
+    secret: str, provider: str, event_id: str, payment_no: str, timestamp: str
+) -> str:
+    canonical = f"{provider}:{event_id}:{payment_no}:{timestamp}"
+    return hmac_new(secret.encode("utf-8"), canonical.encode("utf-8"), sha256).hexdigest()
+
+
+def _valid_callback_signature(
+    secret: str,
+    max_skew_seconds: int,
+    provider: str,
+    event_id: str,
+    payment_no: str,
+    timestamp: str | None,
+    signature: str | None,
+) -> bool:
+    if not secret or not timestamp or not signature:
+        return False
+    try:
+        timestamp_value = int(timestamp)
+    except ValueError:
+        return False
+    if abs(int(time()) - timestamp_value) > max_skew_seconds:
+        return False
+    expected = payment_callback_signature(secret, provider, event_id, payment_no, timestamp)
+    return compare_digest(expected, signature)

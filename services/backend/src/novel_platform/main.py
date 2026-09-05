@@ -1,70 +1,125 @@
-from typing import Never
+import asyncio
+import contextlib
+import logging
+from collections.abc import AsyncIterator, Callable
+from dataclasses import asdict
+from typing import Any, cast
 
+import sqlalchemy as sa
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from novel_platform.core.auth import SessionSigner
+from novel_platform.core.database import get_engine
 from novel_platform.core.errors import (
     http_exception_handler,
     unhandled_exception_handler,
     validation_exception_handler,
 )
-from novel_platform.core.middleware import RequestContextMiddleware
+from novel_platform.core.middleware import PrivateApiMiddleware, RequestContextMiddleware
 from novel_platform.core.settings import Settings
 from novel_platform.interfaces.http.health import build_health_router
 from novel_platform.modules.admin_center.api import build_admin_center_router
 from novel_platform.modules.admin_center.application import AdminCenterService
+from novel_platform.modules.admin_center.sql_service import SqlAdminCenterService
+from novel_platform.modules.agent import AgentGateway, InMemoryAgentAuditLog, ToolResource
+from novel_platform.modules.agent.sql_audit import SqlAgentAuditSink
 from novel_platform.modules.approval.api import build_approval_router
 from novel_platform.modules.approval.application import ApprovalService
+from novel_platform.modules.approval.sql_service import SqlApprovalService
 from novel_platform.modules.author.application import AuthorApplication
 from novel_platform.modules.author.http import build_author_router
-from novel_platform.modules.author.repository import InMemoryAuthorRepository
+from novel_platform.modules.author.repository import InMemoryAuthorRepository, SqlAuthorRepository
 from novel_platform.modules.author_center.api import build_author_center_router
 from novel_platform.modules.author_center.application import AuthorCenterService
-from novel_platform.modules.author_finance.api import build_author_finance_router
+from novel_platform.modules.author_finance.api import (
+    build_author_finance_router,
+    build_payout_callback_router,
+)
 from novel_platform.modules.author_finance.application import AuthorFinanceService
+from novel_platform.modules.author_finance.sql_service import SqlAuthorFinanceService
 from novel_platform.modules.commerce.api import build_refund_router
 from novel_platform.modules.commerce.application import CommerceService
 from novel_platform.modules.commerce.refund import RefundService
+from novel_platform.modules.commerce.sql_refund import SqlRefundService
+from novel_platform.modules.commerce.sql_service import SqlCommerceService
 from novel_platform.modules.community.api import build_community_router
 from novel_platform.modules.community.application import CommunityService
+from novel_platform.modules.community.sql_service import SqlCommunityService
 from novel_platform.modules.content.api import build_content_routers
 from novel_platform.modules.content.application import ContentService
+from novel_platform.modules.content.domain import CommercialPolicy
+from novel_platform.modules.content.sql_service import SqlContentService
 from novel_platform.modules.copyright.api import build_copyright_router
 from novel_platform.modules.copyright.application import CopyrightService
+from novel_platform.modules.copyright.sql_service import SqlCopyrightService
 from novel_platform.modules.governance.api import build_governance_router
 from novel_platform.modules.governance.application import GovernanceService
+from novel_platform.modules.governance.domain import OutboxEvent
+from novel_platform.modules.governance.sql_service import SqlGovernanceService
+from novel_platform.modules.governance.worker import OutboxWorker
 from novel_platform.modules.iam.application import IdentityApplication
 from novel_platform.modules.iam.http import build_iam_router
-from novel_platform.modules.iam.repository import InMemoryIdentityRepository
+from novel_platform.modules.iam.repository import InMemoryIdentityRepository, SqlIdentityRepository
 from novel_platform.modules.legal.api import build_legal_router
 from novel_platform.modules.legal.application import LegalService
+from novel_platform.modules.legal.sql_service import SqlLegalService
 from novel_platform.modules.library.api import build_library_router
 from novel_platform.modules.library.application import LibraryService
+from novel_platform.modules.library.sql_service import SqlLibraryService
+from novel_platform.modules.membership.api import build_membership_router
+from novel_platform.modules.membership.domain import ChapterPolicy, MembershipService
+from novel_platform.modules.membership.sql_service import SqlMembershipService
 from novel_platform.modules.notification.api import build_notification_router
 from novel_platform.modules.notification.application import NotificationService
-from novel_platform.modules.operation.api import build_operation_router
+from novel_platform.modules.notification.sql_service import SqlNotificationService
+from novel_platform.modules.operation.api import (
+    build_operation_router,
+    build_reader_operation_router,
+)
 from novel_platform.modules.operation.application import OperationService
+from novel_platform.modules.operation.sql_service import SqlOperationService
+from novel_platform.modules.payment import SandboxPaymentProvider, SandboxPayoutProvider
 from novel_platform.modules.platform.application import PlatformApplication
 from novel_platform.modules.platform.http import build_platform_router
-from novel_platform.modules.platform.repository import InMemoryPlatformRepository
+from novel_platform.modules.platform.repository import (
+    InMemoryPlatformRepository,
+    SqlPlatformRepository,
+)
+from novel_platform.modules.platform.staff_auth import (
+    StaffAuthService,
+    build_staff_auth_router,
+)
 from novel_platform.modules.reader_experience.api import build_reader_experience_router
 from novel_platform.modules.reader_experience.application import ReaderExperienceService
+from novel_platform.modules.reader_experience.sql_service import SqlReaderExperienceService
 from novel_platform.modules.reading.api import build_reading_router
 from novel_platform.modules.reading.application import ReadingService
+from novel_platform.modules.reading.sql_service import SqlReadingService
 from novel_platform.modules.review.api import build_review_routers
 from novel_platform.modules.review.application import ReviewService
+from novel_platform.modules.review.sql_service import SqlReviewService
 from novel_platform.modules.risk.api import build_risk_router
 from novel_platform.modules.risk.application import RiskService
+from novel_platform.modules.risk.sql_service import SqlRiskService
+from novel_platform.modules.search import (
+    BookSearchFact,
+    OpenSearchSearchAdapter,
+    RefreshingSearchAdapter,
+    SearchService,
+)
+from novel_platform.modules.search.api import build_search_router
 from novel_platform.modules.support.api import build_support_router
 from novel_platform.modules.support.application import SupportService
+from novel_platform.modules.support.sql_service import SqlSupportService
 from novel_platform.modules.wallet.api import build_reader_router as build_wallet_router
 from novel_platform.modules.wallet.application import WalletService
+from novel_platform.modules.wallet.domain import WalletPort
+from novel_platform.modules.wallet.sql_service import SqlWalletService
 
-
-def _refund_source_unavailable(_payment_no: str, _recharge_no: str) -> Never:
-    raise ValueError("REFUND_SOURCE_NOT_FOUND")
+logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
@@ -79,6 +134,7 @@ def create_app() -> FastAPI:
             allow_headers=["*"],
         )
     app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(PrivateApiMiddleware)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
@@ -88,55 +144,377 @@ def create_app() -> FastAPI:
     app.include_router(build_health_router("writer"), prefix="/writer/api/v1")
     app.include_router(build_health_router("admin"), prefix="/admin/api/v1")
 
-    identity = IdentityApplication(InMemoryIdentityRepository())
-    author = AuthorApplication(InMemoryAuthorRepository())
-    platform = PlatformApplication(InMemoryPlatformRepository())
-    content = ContentService()
-    review = ReviewService(content)
-    reading = ReadingService()
-    library = LibraryService()
-    commerce = CommerceService(WalletService())
-    refunds = RefundService(_refund_source_unavailable, lambda _snapshot: None)
-    community = CommunityService()
-    notifications = NotificationService()
-    support = SupportService()
-    risk = RiskService()
-    approvals = ApprovalService()
-    author_finance = AuthorFinanceService()
-    operation = OperationService()
-    author_center = AuthorCenterService(operation)
-    admin_center = AdminCenterService()
-    copyright_service = CopyrightService()
-    legal = LegalService()
-    reader_experience = ReaderExperienceService()
-    governance = GovernanceService()
+    engine = get_engine(settings.database_url) if settings.persistence_mode == "sql" else None
+    identity = IdentityApplication(
+        SqlIdentityRepository(
+            engine,
+            settings.real_name_encryption_key or settings.session_secret,
+        )
+        if engine is not None
+        else InMemoryIdentityRepository(),
+        SessionSigner(
+            settings.session_secret or "development-only-session-secret",
+            settings.session_ttl_seconds,
+        ),
+    )
+    app.state.session_signer = identity.signer
+    author = AuthorApplication(
+        SqlAuthorRepository(engine) if engine is not None else InMemoryAuthorRepository()
+    )
+    app.state.author_service = author
+    platform = PlatformApplication(
+        SqlPlatformRepository(engine) if engine is not None else InMemoryPlatformRepository()
+    )
+    app.state.platform = platform
+    staff_auth = StaffAuthService(
+        platform,
+        identity.signer,
+        engine=engine,
+        mfa_encryption_key=settings.real_name_encryption_key or settings.session_secret,
+    )
+    app.state.staff_auth = staff_auth
+    if settings.staff_bootstrap_employee_code and settings.staff_bootstrap_password:
+        bootstrap = platform.repository.staff_for_employee_code(
+            settings.staff_bootstrap_employee_code
+        )
+        if bootstrap is None:
+            bootstrap_id = platform.create_staff(
+                settings.staff_bootstrap_employee_code, "platform"
+            ).id
+        else:
+            bootstrap_id = bootstrap.id
+        staff_auth.set_password(bootstrap_id, settings.staff_bootstrap_password)
+        for permission in (
+            "admin.access",
+            "review.read",
+            "review.decide",
+            "approval.write",
+            "finance.read",
+            "finance.write",
+            "commerce.write",
+            "risk.read",
+            "risk.write",
+            "operation.read",
+            "operation.write",
+            "legal.write",
+            "support.read",
+            "support.write",
+            "platform.manage",
+            "governance.write",
+        ):
+            platform.grant_permission(bootstrap_id, permission)
+        platform.grant_data_scope(bootstrap_id, "ALL", "*")
+    content = SqlContentService(engine) if engine is not None else ContentService()
+    app.state.content_service = content
+    search_facts = lambda: (
+        BookSearchFact(
+            book_id=book.id,
+            title=metadata.title,
+            synopsis=metadata.synopsis,
+            category=metadata.category,
+            channel=metadata.channel,
+            status=book.lifecycle.value,
+            tags=metadata.tags,
+        )
+        for book, metadata in content.list_public_books()
+    )
+    fallback_search = RefreshingSearchAdapter(search_facts)
+    search = SearchService(
+        OpenSearchSearchAdapter(search_facts, settings.opensearch_url)
+        if settings.opensearch_url
+        else fallback_search,
+        fallback=fallback_search if settings.opensearch_url else None,
+    )
+    agent_audit_sink = SqlAgentAuditSink(engine) if engine is not None else InMemoryAgentAuditLog()
+    app.state.agent_audit_sink = agent_audit_sink
+    agent_gateway = AgentGateway(platform, audit_sink=agent_audit_sink)
+    agent_gateway.register(
+        ToolResource(
+            name="content.get_book",
+            description="Read public book metadata through ContentService",
+            permission="content.read",
+        ),
+        lambda arguments: asdict(
+            content.get_book_metadata(str(arguments["book_id"]), public_only=True)
+        ),
+    )
+    app.state.agent_gateway = agent_gateway
+    review = SqlReviewService(engine, content) if engine is not None else ReviewService(content)
+    app.state.review_service = review
+    reading = SqlReadingService(engine) if engine is not None else ReadingService()
+    app.state.reading_service = reading
+    library = SqlLibraryService(engine) if engine is not None else LibraryService()
+    app.state.library_service = library
+    membership = (
+        SqlMembershipService(engine, identity.is_real_named)
+        if engine is not None
+        else MembershipService()
+    )
+    app.state.membership_service = membership
+    if settings.persistence_mode == "sql" and engine is not None:
+        wallet: WalletPort = SqlWalletService(engine)
+    else:
+        wallet = WalletService()
+    app.state.wallet_service = wallet
 
-    app.include_router(build_iam_router(identity), prefix="/api/v1")
-    app.include_router(build_author_router(author), prefix="/writer/api/v1")
-    app.include_router(build_platform_router(platform), prefix="/admin/api/v1")
-    for router in build_content_routers(content):
+    def spend_gift_in_transaction(
+        connection: Any, account_id: str, amount: int, spend_mode: str
+    ) -> None:
+        spend = getattr(wallet, "spend_in_transaction", None)
+        if not callable(spend):
+            raise TypeError("GIFT_TRANSACTION_CONFIGURATION_ERROR")
+        spend(connection, account_id, amount, reason="GIFT", spend_mode=spend_mode)
+
+    gift_asset_spend: Callable[[Any, str, int, str], None] | None = (
+        spend_gift_in_transaction if engine is not None else None
+    )
+    commerce = (
+        SqlCommerceService(engine, wallet, identity.is_real_named)
+        if engine is not None
+        else CommerceService(wallet, identity.is_real_named)
+    )
+    payment_provider = SandboxPaymentProvider(
+        settings.payment_callback_secret,
+        provider_name="SANDBOX",
+    )
+    commerce.payment_provider = payment_provider
+    commerce.payment_provider_secret = settings.payment_callback_secret
+    app.state.commerce_service = commerce
+    refunds: RefundService
+    if engine is not None:
+        recover_assets_in_connection = None
+        recover_source_assets = getattr(wallet, "recover_source_assets_in_transaction", None)
+        account_id_for_refund = commerce.refund_account
+        if callable(recover_source_assets):
+            recover_assets_in_connection = lambda connection, calculation: recover_source_assets(
+                connection,
+                account_id_for_refund(calculation.payment_no, calculation.recharge_no),
+                calculation.recharge_no,
+            )
+        refunds = SqlRefundService(
+            engine,
+            commerce.refund_source,
+            commerce.recover_refund_assets,
+            commerce.refund_account,
+            recover_assets_in_connection,
+            getattr(commerce, "refund_source_in_transaction", None),
+        )
+    else:
+        refunds = RefundService(
+            commerce.refund_source, commerce.recover_refund_assets, commerce.refund_account
+        )
+    app.state.refund_service = refunds
+    community = SqlCommunityService(engine) if engine is not None else CommunityService()
+    app.state.community_service = community
+    notifications = SqlNotificationService(engine) if engine is not None else NotificationService()
+    app.state.notification_service = notifications
+    support = SqlSupportService(engine) if engine is not None else SupportService()
+    app.state.support_service = support
+    risk = SqlRiskService(engine) if engine is not None else RiskService()
+    app.state.risk_service = risk
+    approvals = SqlApprovalService(engine) if engine is not None else ApprovalService()
+    app.state.approval_service = approvals
+    author_finance = (
+        SqlAuthorFinanceService(engine) if engine is not None else AuthorFinanceService()
+    )
+    payout_provider = SandboxPayoutProvider(
+        settings.payment_callback_secret,
+        provider_name="SANDBOX_PAYOUT",
+    )
+    author_finance.payout_provider = payout_provider
+    author_finance.payout_provider_secret = settings.payment_callback_secret
+    app.state.author_finance_service = author_finance
+
+    configure_chapter_commercial_policy: Callable[[str, ChapterPolicy], object] | None = None
+    if engine is not None:
+
+        def configure_chapter_commercial_policy(chapter_id: str, policy: ChapterPolicy) -> None:
+            content.set_chapter_commercial_policy(chapter_id, CommercialPolicy.VIP)
+            commerce.register_chapter_policy(chapter_id, policy)
+
+        def record_chapter_revenue_from_content(
+            connection: Any,
+            chapter_id: str,
+            purchase_no: str,
+            gross_cents: int,
+        ) -> object:
+            chapter = content.get_chapter(chapter_id)
+            volume = content.get_volume(chapter.volume_id)
+            book = content.get_book(volume.book_id)
+            sql_author_finance = cast(SqlAuthorFinanceService, author_finance)
+            return sql_author_finance.record_revenue_in_transaction(
+                connection,
+                book.author_id,
+                book.id,
+                "CHAPTER_PURCHASE",
+                purchase_no,
+                gross_cents,
+            )
+
+        commerce.record_revenue_in_transaction = record_chapter_revenue_from_content
+    operation = SqlOperationService(engine) if engine is not None else OperationService()
+    app.state.operation_service = operation
+    author_center = AuthorCenterService(operation)
+    admin_center = SqlAdminCenterService(engine) if engine is not None else AdminCenterService()
+    app.state.admin_center_service = admin_center
+    copyright_service = SqlCopyrightService(engine) if engine is not None else CopyrightService()
+    app.state.copyright_service = copyright_service
+    legal = SqlLegalService(engine) if engine is not None else LegalService()
+    app.state.legal_service = legal
+    reader_experience = (
+        SqlReaderExperienceService(engine) if engine is not None else ReaderExperienceService()
+    )
+    app.state.reader_experience_service = reader_experience
+    governance = SqlGovernanceService(engine) if engine is not None else GovernanceService()
+    app.state.governance_service = governance
+
+    delivery_table = None
+    if engine is not None and getattr(engine, "dialect", None) is not None:
+        delivery_table = sa.Table("outbox_event_deliveries", sa.MetaData(), autoload_with=engine)
+    delivered_events: set[tuple[str, str]] = set()
+
+    def deliver_outbox_event(event: OutboxEvent) -> None:
+        consumer = "backend-runtime"
+        if delivery_table is None:
+            delivered_events.add((event.id, consumer))
+            return
+        assert engine is not None
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    delivery_table.insert().values(event_id=event.id, consumer=consumer)
+                )
+        except sa.exc.IntegrityError:
+            return
+
+    outbox_event_types = (
+        "BOOK_INDEX",
+        "BOOK_TAKEN_DOWN",
+        "ChapterPurchased",
+        "ContractCreated",
+        "ContractActivated",
+        "RechargeOrderCreated",
+        "RechargeCredited",
+        "EntitlementCreated",
+        "PaymentSucceeded",
+        "PaymentStatusChanged",
+        "RevenueCreated",
+        "SettlementCreated",
+        "WithdrawalRequested",
+        "PayoutOrderCreated",
+        "PayoutSucceeded",
+        "PayoutStatusChanged",
+    )
+    outbox_worker = OutboxWorker(
+        governance,
+        {event_type: deliver_outbox_event for event_type in outbox_event_types},
+        worker_id=settings.outbox_worker_id,
+    )
+    app.state.outbox_worker = outbox_worker
+    app.state.outbox_deliveries = delivered_events
+
+    async def outbox_pump() -> None:
+        while True:
+            try:
+                await asyncio.to_thread(outbox_worker.run_once, limit=50)
+            except Exception:
+                logger.exception("outbox worker iteration failed")
+            await asyncio.sleep(settings.outbox_poll_interval_seconds)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        app.state.outbox_worker_task = asyncio.create_task(outbox_pump())
+        try:
+            yield
+        finally:
+            task = getattr(app.state, "outbox_worker_task", None)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    app.router.lifespan_context = lifespan
+
+    app.include_router(build_iam_router(identity, auth_required=True), prefix="/api/v1")
+    app.include_router(build_author_router(author, auth_required=True), prefix="/writer/api/v1")
+    app.include_router(
+        build_platform_router(
+            platform,
+            on_staff_inactive=staff_auth.revoke_all_for_staff,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        ),
+        prefix="/admin/api/v1",
+    )
+    app.include_router(build_staff_auth_router(staff_auth))
+    for router in build_content_routers(
+        content,
+        auth_required=True,
+        account_for_author=author.account_id_for_profile,
+        configure_commercial_policy=configure_chapter_commercial_policy,
+        authorize_staff=staff_auth.authorize,
+    ):
         app.include_router(router)
-    for router in build_review_routers(review):
+    for router in build_review_routers(
+        review,
+        auth_required=True,
+        account_for_author=author.account_id_for_profile,
+        staff_scopes=platform.repository.scopes_for,
+    ):
         app.include_router(router)
-    app.include_router(build_reading_router(reading))
-    app.include_router(build_library_router(library), prefix="/api/v1")
-    app.include_router(build_wallet_router(commerce), prefix="/api/v1")
-    app.include_router(build_refund_router(refunds), prefix="/api/v1")
-    app.include_router(build_community_router(community))
-    app.include_router(build_notification_router(notifications))
-    app.include_router(build_support_router(support))
+    app.include_router(build_reading_router(reading, auth_required=True))
+    app.include_router(build_library_router(library, auth_required=True), prefix="/api/v1")
+    app.include_router(build_search_router(search))
+    app.include_router(
+        build_wallet_router(
+            commerce,
+            auth_required=True,
+            callback_secret=settings.payment_callback_secret,
+            callback_max_skew_seconds=settings.payment_callback_max_skew_seconds,
+        ),
+        prefix="/api/v1",
+    )
+    app.include_router(build_refund_router(refunds, auth_required=True), prefix="/api/v1")
+    app.include_router(
+        build_membership_router(
+            membership,
+            auth_required=True,
+            callback_secret=settings.payment_callback_secret,
+            callback_max_skew_seconds=settings.payment_callback_max_skew_seconds,
+            asset_spend=gift_asset_spend,
+        )
+    )
+    app.include_router(build_community_router(community, auth_required=True))
+    app.include_router(build_notification_router(notifications, auth_required=True))
+    app.include_router(
+        build_support_router(support, auth_required=True, authorize_staff=staff_auth.authorize)
+    )
     app.include_router(build_risk_router(risk))
-    app.include_router(build_approval_router(approvals))
-    for router in build_author_finance_router(author_finance):
+    app.include_router(build_approval_router(approvals, auth_required=True))
+    for router in build_author_finance_router(
+        author_finance,
+        auth_required=True,
+        account_for_author=author.account_id_for_profile,
+        is_real_named=identity.is_real_named,
+        authorize_staff=staff_auth.authorize,
+    ):
         app.include_router(router)
-    for router in build_author_center_router(author_center):
+    app.include_router(build_payout_callback_router(author_finance))
+    for router in build_author_center_router(
+        author_center,
+        auth_required=True,
+        account_for_author=author.account_id_for_profile,
+    ):
         app.include_router(router)
     app.include_router(build_admin_center_router(admin_center))
     app.include_router(build_operation_router(operation))
+    app.include_router(build_reader_operation_router(operation))
     app.include_router(build_copyright_router(copyright_service))
     app.include_router(build_legal_router(legal))
-    app.include_router(build_reader_experience_router(content, reader_experience))
-    app.include_router(build_governance_router(governance))
+    app.include_router(
+        build_reader_experience_router(content, reader_experience, auth_required=True)
+    )
+    app.include_router(build_governance_router(governance, auth_required=True))
     return app
 
 

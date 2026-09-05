@@ -1,8 +1,10 @@
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import optional_session, require_account_access
 from novel_platform.modules.content.application import ContentService
 from novel_platform.modules.content.domain import (
     Book,
@@ -96,7 +98,7 @@ def _catalog_item(book: Book, metadata: BookMetadataVersion) -> CatalogItemRespo
 
 
 def build_reader_experience_router(
-    content: ContentService, service: ReaderExperienceService
+    content: ContentService, service: ReaderExperienceService, *, auth_required: bool = False
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1", tags=["reader-experience"])
 
@@ -123,14 +125,23 @@ def build_reader_experience_router(
         return CatalogResponse(items=items, total=len(items))
 
     @router.post("/books/{book_id}/ratings", status_code=status.HTTP_201_CREATED)
-    def rate(book_id: str, payload: RatingRequest) -> dict[str, object]:
+    def rate(
+        book_id: str,
+        payload: RatingRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_account_access(session, payload.account_id, required=auth_required)
         try:
             return asdict(service.rate(book_id=book_id, **payload.model_dump()))
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.post("/social/follows", status_code=status.HTTP_201_CREATED)
-    def follow(payload: FollowRequest) -> dict[str, object]:
+    def follow(
+        payload: FollowRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_account_access(session, payload.account_id, required=auth_required)
         try:
             created = service.follow(**payload.model_dump())
         except ValueError as exc:
@@ -138,18 +149,29 @@ def build_reader_experience_router(
         return {**payload.model_dump(), "created": created}
 
     @router.delete("/social/follows", status_code=status.HTTP_204_NO_CONTENT)
-    def unfollow(payload: FollowRequest) -> None:
+    def unfollow(
+        payload: FollowRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> None:
+        require_account_access(session, payload.account_id, required=auth_required)
         try:
             service.unfollow(**payload.model_dump())
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.get("/accounts/{account_id}/follows")
-    def following(account_id: str) -> dict[str, object]:
+    def following(
+        account_id: str, session: SessionClaims | None = Depends(optional_session)
+    ) -> dict[str, object]:
+        require_account_access(session, account_id, required=auth_required)
         return {"account_id": account_id, "items": service.following(account_id)}
 
     @router.post("/accounts/growth/events", status_code=status.HTTP_201_CREATED)
-    def add_growth(payload: GrowthRequest) -> dict[str, object]:
+    def add_growth(
+        payload: GrowthRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_account_access(session, payload.account_id, required=auth_required)
         try:
             event = service.add_growth(**payload.model_dump())
         except ValueError as exc:
@@ -157,18 +179,30 @@ def build_reader_experience_router(
         return asdict(event)
 
     @router.get("/accounts/{account_id}/growth")
-    def growth(account_id: str) -> dict[str, object]:
+    def growth(
+        account_id: str, session: SessionClaims | None = Depends(optional_session)
+    ) -> dict[str, object]:
+        require_account_access(session, account_id, required=auth_required)
         return asdict(service.growth(account_id))
 
     @router.post("/content-corrections", status_code=status.HTTP_201_CREATED)
-    def correction(payload: CorrectionRequest) -> dict[str, object]:
+    def correction(
+        payload: CorrectionRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_account_access(session, payload.account_id, required=auth_required)
         try:
             return asdict(service.submit_correction(**payload.model_dump()))
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.put("/accounts/{account_id}/minor-protection")
-    def minor_protection(account_id: str, payload: MinorProtectionRequest) -> dict[str, object]:
+    def minor_protection(
+        account_id: str,
+        payload: MinorProtectionRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> dict[str, object]:
+        require_account_access(session, account_id, required=auth_required)
         try:
             protection = service.set_minor_protection(account_id, **payload.model_dump())
         except ValueError as exc:

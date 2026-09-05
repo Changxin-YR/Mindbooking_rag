@@ -2,6 +2,8 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
+from hmac import new as hmac_new
+from os import getenv
 
 
 class IdentityType(StrEnum):
@@ -61,8 +63,14 @@ def normalize_phone(phone: str) -> str:
     return normalized
 
 
-def identity_document_fingerprint(identity_document: str) -> str:
+def identity_document_fingerprint(identity_document: str, secret: str | None = None) -> str:
     normalized = identity_document.strip().upper()
     if re.fullmatch(r"[0-9]{17}[0-9X]", normalized) is None:
         raise InvalidIdentityDocumentError("identity_document must be a valid identity number")
-    return sha256(normalized.encode("ascii")).hexdigest()
+    key = (
+        secret
+        or getenv("PII_FINGERPRINT_SECRET")
+        or getenv("HMAC_SECRET")
+        or "development-only-pii-key"
+    ).encode("utf-8")
+    return hmac_new(key, normalized.encode("ascii"), sha256).hexdigest()

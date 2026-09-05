@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision: str = "0010_reader_experience"
 down_revision: str | None = "0009_operation_legal"
@@ -21,9 +21,33 @@ def _created_at() -> sa.Column:
 
 
 def upgrade() -> None:
-    op.add_column("book_metadata_versions", sa.Column("channel", sa.String(16), nullable=False, server_default="UNSPECIFIED"))
-    op.add_column("book_metadata_versions", sa.Column("category", sa.String(64), nullable=False, server_default=""))
-    op.add_column("book_metadata_versions", sa.Column("tags_json", sa.Text, nullable=False, server_default="[]"))
+    existing_columns = (
+        set()
+        if context.is_offline_mode()
+        else {
+            column["name"]
+            for column in sa.inspect(op.get_bind()).get_columns("book_metadata_versions")
+        }
+    )
+    if "channel" not in existing_columns:
+        op.add_column(
+            "book_metadata_versions",
+            sa.Column("channel", sa.String(16), nullable=False, server_default="UNSPECIFIED"),
+        )
+    if "category" not in existing_columns:
+        op.add_column(
+            "book_metadata_versions",
+            sa.Column("category", sa.String(64), nullable=False, server_default=""),
+        )
+    if "tags_json" not in existing_columns:
+        op.add_column("book_metadata_versions", sa.Column("tags_json", sa.Text, nullable=True))
+        op.execute("UPDATE book_metadata_versions SET tags_json = '[]' WHERE tags_json IS NULL")
+        op.alter_column(
+            "book_metadata_versions",
+            "tags_json",
+            existing_type=sa.Text(),
+            nullable=False,
+        )
     op.create_table(
         "book_user_ratings",
         sa.Column("id", sa.String(64), primary_key=True),

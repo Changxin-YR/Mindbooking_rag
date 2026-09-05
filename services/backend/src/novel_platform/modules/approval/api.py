@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from novel_platform.core.http_auth import require_staff_session
 from novel_platform.modules.approval.application import ApprovalService, MakerCheckerError
 from novel_platform.modules.approval.domain import ApprovalRequest, ApprovalStatus
 
@@ -34,18 +35,26 @@ def _response(approval: ApprovalRequest) -> ApprovalResponse:
     return ApprovalResponse.model_validate(approval, from_attributes=True)
 
 
-def build_approval_router(service: ApprovalService) -> APIRouter:
+def build_approval_router(service: ApprovalService, *, auth_required: bool = False) -> APIRouter:
     router = APIRouter(prefix="/admin/api/v1/approvals", tags=["approval"])
 
     @router.post("", response_model=ApprovalResponse, status_code=status.HTTP_201_CREATED)
-    def create_approval(payload: CreateApprovalRequest) -> ApprovalResponse:
-        return _response(service.request(payload.action, payload.requester_id, payload.critical))
+    def create_approval(payload: CreateApprovalRequest, request: Request) -> ApprovalResponse:
+        requester_id = (
+            require_staff_session(request).account_id if auth_required else payload.requester_id
+        )
+        return _response(service.request(payload.action, requester_id, payload.critical))
 
     @router.post("/{approval_id}/decision", response_model=ApprovalResponse)
-    def decide(approval_id: str, payload: ApprovalDecisionRequest) -> ApprovalResponse:
+    def decide(
+        approval_id: str, payload: ApprovalDecisionRequest, request: Request
+    ) -> ApprovalResponse:
         try:
             decision = service.approve if payload.decision == "APPROVE" else service.reject
-            return _response(decision(approval_id, payload.approver_id))
+            approver_id = (
+                require_staff_session(request).account_id if auth_required else payload.approver_id
+            )
+            return _response(decision(approval_id, approver_id))
         except KeyError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="approval not found") from exc
         except MakerCheckerError as exc:

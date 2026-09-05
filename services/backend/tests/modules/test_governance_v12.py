@@ -19,6 +19,15 @@ from novel_platform.modules.platform.domain import StaffStatus
 from novel_platform.modules.platform.repository import InMemoryPlatformRepository
 
 
+def _staff_headers(client: TestClient) -> dict[str, str]:
+    response = client.post(
+        "/admin/api/v1/auth/staff/sessions",
+        json={"employee_code": "ops-test", "password": "StaffPassword#123"},
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
 def test_privacy_and_agreement_facts_are_idempotent_by_version() -> None:
     service = GovernanceService()
 
@@ -74,26 +83,53 @@ def test_emergency_and_outbox_are_explicit_and_recoverable() -> None:
     assert service.outbox_event(event.id).payload["visibility"] == "OFFLINE"
 
 
-def test_governance_api_exposes_explicit_workflows() -> None:
+def test_governance_api_exposes_explicit_workflows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-test")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
     client = TestClient(create_app())
+    account = client.post(
+        "/api/v1/iam/accounts",
+        json={"phone": "13800138025", "password": "Correct#123"},
+    ).json()["account_id"]
+    token = client.post(
+        "/api/v1/iam/sessions",
+        json={"phone": "13800138025", "password": "Correct#123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    staff_headers = _staff_headers(client)
+    checker = client.app.state.platform.create_staff("checker-1", "platform")
+    client.app.state.staff_auth.set_password(checker.id, "CheckerPassword#123")
+    client.app.state.platform.grant_permission(checker.id, "governance.write")
+    client.app.state.platform.grant_data_scope(checker.id, "ALL", "*")
     privacy = client.post(
-        "/api/v1/privacy/requests", json={"account_id": "acct-1", "kind": "EXPORT"}
+        "/api/v1/privacy/requests",
+        json={"account_id": account, "kind": "EXPORT"},
+        headers=headers,
     )
     assert privacy.status_code == 201
     draft = client.post(
         "/admin/api/v1/parameters",
         json={"key": "vip.price", "value": "199", "maker_id": "maker-1"},
+        headers=staff_headers,
     )
     assert draft.status_code == 201
     parameter_id = draft.json()["id"]
+    checker_login = client.post(
+        "/admin/api/v1/auth/staff/sessions",
+        json={"employee_code": "checker-1", "password": "CheckerPassword#123"},
+    )
+    assert checker_login.status_code == 200
     approved = client.post(
-        f"/admin/api/v1/parameters/{parameter_id}/approve", params={"checker_id": "checker-1"}
+        f"/admin/api/v1/parameters/{parameter_id}/approve",
+        params={"checker_id": "checker-1"},
+        headers={"Authorization": f"Bearer {checker_login.json()['access_token']}"},
     )
     assert approved.status_code == 200
     assert (
         client.post(
             f"/admin/api/v1/parameters/{parameter_id}/activate",
             json={"effective_at": "2026-09-04T00:00:00+00:00"},
+            headers=staff_headers,
         ).json()["status"]
         == "ACTIVE"
     )
@@ -119,24 +155,38 @@ def test_invoice_lifecycle_is_not_a_wallet_adjustment() -> None:
     assert reversed_invoice.status == "REVERSED"
 
 
-def test_operation_campaign_and_reward_endpoints_are_idempotent() -> None:
+def test_operation_campaign_and_reward_endpoints_are_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-test")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
     client = TestClient(create_app())
+    client.post(
+        "/api/v1/iam/accounts",
+        json={"phone": "13800138026", "password": "Correct#123"},
+    )
+    client.post(
+        "/api/v1/iam/sessions",
+        json={"phone": "13800138026", "password": "Correct#123"},
+    )
+    staff_headers = _staff_headers(client)
     campaign = client.post(
         "/admin/api/v1/operation/campaigns",
         json={"title": "秋日征文", "start_date": "2026-09-01", "end_date": "2026-10-01"},
+        headers=staff_headers,
     )
     assert campaign.status_code == 201
     reward = client.post(
         "/admin/api/v1/operation/rewards",
         json={"subject_id": "author-1", "reward_type": "POINT", "amount": 10},
-        headers={"Idempotency-Key": "reward-request-1"},
+        headers={**staff_headers, "Idempotency-Key": "reward-request-1"},
     )
     assert reward.status_code == 201
     assert (
         client.post(
             "/admin/api/v1/operation/rewards",
             json={"subject_id": "author-1", "reward_type": "POINT", "amount": 10},
-            headers={"Idempotency-Key": "reward-request-1"},
+            headers={**staff_headers, "Idempotency-Key": "reward-request-1"},
         ).json()["id"]
         == reward.json()["id"]
     )

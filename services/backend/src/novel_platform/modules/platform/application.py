@@ -66,15 +66,34 @@ class PlatformApplication:
         self._require_staff(staff_id)
         self.repository.grant_data_scope(DataScope.create(staff_id, scope_type, scope_value))
 
+    def staff_for_employee_code(self, employee_code: str) -> StaffAccount:
+        staff = self.repository.staff_for_employee_code(employee_code.strip())
+        if staff is None:
+            raise StaffNotFoundError("staff account does not exist")
+        return staff
+
     def can_access(self, staff_id: str, permission: str, scope_type: str, scope_value: str) -> bool:
         staff = self._require_staff(staff_id)
-        if (
-            staff.status is not StaffStatus.ACTIVE
-            or permission not in self.repository.permissions_for(staff_id)
+        if staff.status is not StaffStatus.ACTIVE or not _has_permission(
+            self.repository.permissions_for(staff_id), permission
         ):
             return False
-        scopes = self.repository.scopes_for(staff_id)
-        return ("global", "*") in scopes or (scope_type, scope_value) in scopes
+        requested_scope = (scope_type.upper(), scope_value.strip())
+        scopes = {
+            (stored_type.upper(), stored_value.strip())
+            for stored_type, stored_value in self.repository.scopes_for(staff_id)
+        }
+        return any(
+            (stored_type in {"ALL", "GLOBAL"} and stored_value == "*")
+            or (stored_type, stored_value) == requested_scope
+            for stored_type, stored_value in scopes
+        )
+
+    def has_permission(self, staff_id: str, permission: str) -> bool:
+        staff = self._require_staff(staff_id)
+        return staff.status is StaffStatus.ACTIVE and _has_permission(
+            self.repository.permissions_for(staff_id), permission
+        )
 
     def require_access(
         self, staff_id: str, permission: str, scope_type: str, scope_value: str
@@ -101,3 +120,13 @@ __all__ = [
     "StaffNotFoundError",
     "StaffResult",
 ]
+
+
+def _has_permission(granted: set[str], requested: str) -> bool:
+    resource, _, action = requested.partition(".")
+    return (
+        requested in granted
+        or "*.*" in granted
+        or f"{resource}.*" in granted
+        or (resource == "*" and action == "*")
+    )

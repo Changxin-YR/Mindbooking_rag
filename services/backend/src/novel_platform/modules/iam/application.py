@@ -1,5 +1,10 @@
 from dataclasses import dataclass
+from hashlib import pbkdf2_hmac
+from hmac import compare_digest
+from os import getenv
+from secrets import token_bytes
 
+from novel_platform.core.auth import SessionSigner
 from novel_platform.modules.iam.domain import (
     AccountRealNameLink,
     InvalidIdentityDocumentError,
@@ -29,6 +34,10 @@ class RealNameSlotLimitError(ValueError):
     pass
 
 
+class InvalidCredentialsError(ValueError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class AccountRegistration:
     account_id: str
@@ -36,16 +45,45 @@ class AccountRegistration:
     phone: str
 
 
-class IdentityApplication:
-    def __init__(self, repository: IdentityRepository) -> None:
-        self.repository = repository
+@dataclass(frozen=True, slots=True)
+class AuthenticatedSession:
+    account_id: str
+    token: str
 
-    def register_phone_account(self, phone: str) -> AccountRegistration:
+
+class IdentityApplication:
+    def __init__(self, repository: IdentityRepository, signer: SessionSigner | None = None) -> None:
+        self.repository = repository
+        self.signer = signer or SessionSigner(getenv("SESSION_SECRET", "dev-only-session-secret"))
+        bind_store = getattr(self.signer, "bind_session_store", None)
+        if callable(bind_store) and all(
+            callable(getattr(repository, name, None))
+            for name in ("create_session", "session_active", "revoke_session")
+        ):
+            bind_store(repository)
+
+    def register_phone_account(
+        self, phone: str, password: str | None = None
+    ) -> AccountRegistration:
         normalized_phone = normalize_phone(phone)
         identity = self.repository.get_or_create_phone_identity(normalized_phone)
         account = self.repository.create_account()
         self.repository.link_account(identity.id, account.id)
+        if password is not None:
+            self.set_password(account.id, password)
         return AccountRegistration(account.id, identity.id, normalized_phone)
+
+    def set_password(self, account_id: str, password: str) -> None:
+        if not isinstance(password, str) or len(password) < 8:
+            raise ValueError("password must contain at least 8 characters")
+        self.repository.set_password_hash(account_id, _hash_password(password))
+
+    def authenticate_phone(self, phone: str, password: str) -> AuthenticatedSession:
+        account = self.default_account_for_phone(phone)
+        password_hash = self.repository.password_hash_for_account(account.id)
+        if password_hash is None or not _verify_password(password, password_hash):
+            raise InvalidCredentialsError("invalid phone or password")
+        return AuthenticatedSession(account.id, self.signer.issue(account.id))
 
     def accounts_for_phone(self, phone: str) -> list[PlatformAccount]:
         identity = self._phone_identity(phone)
@@ -79,12 +117,20 @@ class IdentityApplication:
             existing = self.repository.real_name_link_for_account(account_id)
             if existing is not None:
                 raise AccountAlreadyRealNamedError("account already has a real-name link")
-            subject = self.repository.get_or_create_real_name_subject(fingerprint, name)
+            subject = self.repository.get_or_create_real_name_subject(
+                fingerprint, name, identity_document
+            )
             if self.repository.count_active_real_name_links(fingerprint) >= 3:
                 raise RealNameSlotLimitError("real-name subject has reached the 3-account limit")
             return self.repository.link_real_name_account(
                 account_id, subject.id, status=RealNameSlotStatus.ACTIVE
             )
+
+    def is_real_named(self, account_id: str) -> bool:
+        return self.repository.has_active_real_name_link(account_id)
+
+    def revoke_session(self, token: str) -> None:
+        self.signer.revoke(token)
 
     def _phone_identity(self, phone: str) -> LoginIdentity:
         normalized_phone = normalize_phone(phone)
@@ -98,9 +144,31 @@ __all__ = [
     "AccountAlreadyRealNamedError",
     "AccountNotFoundError",
     "AccountRegistration",
+    "AuthenticatedSession",
     "IdentityApplication",
     "IdentityNotFoundError",
+    "InvalidCredentialsError",
     "InvalidIdentityDocumentError",
     "InvalidPhoneError",
     "RealNameSlotLimitError",
 ]
+
+
+def _hash_password(password: str) -> str:
+    salt = token_bytes(16)
+    iterations = 600_000
+    digest = pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, raw_iterations, salt_hex, digest_hex = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        actual = pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(raw_iterations)
+        )
+        return compare_digest(actual, bytes.fromhex(digest_hex))
+    except TypeError, ValueError:
+        return False

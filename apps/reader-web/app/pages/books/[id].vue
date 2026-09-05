@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import type { ReaderBookDetailResponseDto } from '@mindbooking/api-types'
 import { bookDetailPath } from '../../../src/catalog'
+import { buildRequestHeaders, loadSession } from '../../../src/session'
 
 const route = useRoute()
 const runtimeConfig = useRuntimeConfig()
-const accountId = 'acct-demo'
+const session = loadSession()
+const accountId = session?.accountId ?? ''
+const headers = session ? buildRequestHeaders(session.token) : undefined
 const bookId = String(route.params.id)
 const { data: book, pending, error } = await useFetch<ReaderBookDetailResponseDto>(
   bookDetailPath(bookId, runtimeConfig.public.apiBaseUrl),
@@ -16,30 +19,33 @@ const rating = reactive({ overall_score: 5, plot_score: 5, character_score: 5, w
 async function submitRating() {
   if (!book.value) return
   try {
-    await $fetch(`${runtimeConfig.public.apiBaseUrl}/api/v1/books/${encodeURIComponent(book.value.id)}/ratings`, { method: 'POST', body: { account_id: accountId, ...rating } })
+    if (!session) throw new Error('AUTHENTICATION_REQUIRED')
+    await $fetch(`${runtimeConfig.public.apiBaseUrl}/api/v1/books/${encodeURIComponent(book.value.id)}/ratings`, { method: 'POST', headers, body: { account_id: accountId, ...rating } })
     notice.value = '评分已提交'
   } catch {
-    notice.value = '当前阅读量未达到评分条件'
+    notice.value = session ? '当前阅读量未达到评分条件' : '请先登录后评分'
   }
 }
 
 async function followAuthor() {
   if (!book.value) return
   try {
-    await $fetch(`${runtimeConfig.public.apiBaseUrl}/api/v1/social/follows`, { method: 'POST', body: { account_id: accountId, target_type: 'AUTHOR', target_id: book.value.author_id } })
+    if (!session) throw new Error('AUTHENTICATION_REQUIRED')
+    await $fetch(`${runtimeConfig.public.apiBaseUrl}/api/v1/social/follows`, { method: 'POST', headers, body: { account_id: accountId, target_type: 'AUTHOR', target_id: book.value.author_id } })
     notice.value = '已关注作者'
   } catch {
-    notice.value = '关注暂时不可用'
+    notice.value = session ? '关注暂时不可用' : '请先登录后关注作者'
   }
 }
 
 async function addToShelf() {
   if (!book.value) return
   try {
-    await $fetch(`${runtimeConfig.public.apiBaseUrl}/api/v1/books/${encodeURIComponent(book.value.id)}/bookshelf`, { method: 'POST', body: { account_id: accountId, group_name: 'default' } })
+    if (!session) throw new Error('AUTHENTICATION_REQUIRED')
+    await $fetch(`${runtimeConfig.public.apiBaseUrl}/api/v1/books/${encodeURIComponent(book.value.id)}/bookshelf`, { method: 'POST', headers, body: { account_id: accountId, group_name: 'default' } })
     notice.value = '已加入书架'
   } catch {
-    notice.value = '加入书架暂时不可用'
+    notice.value = session ? '加入书架暂时不可用' : '请先登录后加入书架'
   }
 }
 </script>

@@ -18,3 +18,20 @@
 .academy-item { display: grid; gap: 8px; padding: 16px; border: 1px solid #e0e7e3; border-radius: 4px; }
 .academy-item span { color: #e48770; font-size: 11px; }
 @media (max-width: 760px) { .inline-form, .quick-actions { flex-direction: column; }.academy-grid { grid-template-columns: repeat(2, 1fr); }.finance-row { grid-template-columns: 1fr auto; }.finance-row small { grid-column: 1 / -1; text-align: left; padding-bottom: 8px; } }
+.session-box { display: grid; gap: 12px; }
+.session-box label { display: grid; gap: 6px; color: #607274; font-size: 12px; text-align: left; }
+.session-box input { width: 100%; padding: 11px; border: 1px solid #dce3df; border-radius: 4px; font: inherit; }
+.session-box button { justify-self: center; margin-top: 8px; border: 0; cursor: pointer; font: inherit; }
+.session-error { margin: 0 !important; color: #b65345 !important; }
+.editor-card { gap: 24px; }
+.editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.editor-step { display: grid; gap: 10px; padding: 18px 0; border-top: 1px solid #e7ece9; }
+.editor-step h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.editor-step label { display: grid; gap: 6px; color: #607274; font-size: 12px; }
+.editor-step input, .editor-step select, .editor-step textarea { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #dce3df; border-radius: 4px; font: inherit; background: #fff; }
+.editor-step textarea { min-height: 220px; resize: vertical; line-height: 1.7; }
+.editor-writing { grid-column: 1 / -1; }
+.editor-actions { display: flex; gap: 10px; align-items: center; }
+.editor-step output, .action-message { color: #4e6868; font-size: 12px; }
+.action-message { margin: 0; }
+@media (max-width: 760px) { .editor-grid { grid-template-columns: 1fr; } .editor-writing { grid-column: auto; } }

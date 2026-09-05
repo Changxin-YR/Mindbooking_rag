@@ -12,7 +12,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def _created_at() -> sa.Column:
-    return sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP"))
+    return sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.text("CURRENT_TIMESTAMP"),
+    )
 
 
 def upgrade() -> None:
@@ -23,7 +28,9 @@ def upgrade() -> None:
         sa.Column("book_id", sa.String(64), nullable=False),
         sa.Column("status", sa.String(24), nullable=False),
         _created_at(),
-        sa.CheckConstraint("status IN ('DRAFT', 'APPROVED', 'ACTIVE', 'TERMINATED')", name="ck_contract_status"),
+        sa.CheckConstraint(
+            "status IN ('DRAFT', 'APPROVED', 'ACTIVE', 'TERMINATED')", name="ck_contract_status"
+        ),
     )
     op.create_table(
         "contract_versions",
@@ -48,7 +55,9 @@ def upgrade() -> None:
         sa.Column("settlement_id", sa.String(64), nullable=True),
         _created_at(),
         sa.UniqueConstraint("source_ref", name="uq_author_revenue_source_ref"),
-        sa.CheckConstraint("gross_cents > 0 AND author_cents >= 0", name="ck_author_revenue_amount"),
+        sa.CheckConstraint(
+            "gross_cents > 0 AND author_cents >= 0", name="ck_author_revenue_amount"
+        ),
     )
     op.create_table(
         "author_settlements",
@@ -60,7 +69,9 @@ def upgrade() -> None:
         sa.Column("status", sa.String(24), nullable=False),
         _created_at(),
         sa.UniqueConstraint("author_id", "period", name="uq_author_settlement_period"),
-        sa.CheckConstraint("amount_cents >= 0 AND withdrawn_cents >= 0", name="ck_settlement_amount"),
+        sa.CheckConstraint(
+            "amount_cents >= 0 AND withdrawn_cents >= 0", name="ck_settlement_amount"
+        ),
     )
     op.create_table(
         "withdrawal_requests",
@@ -81,7 +92,9 @@ def upgrade() -> None:
         sa.Column("amount_cents", sa.BigInteger, nullable=False),
         sa.Column("recovered_cents", sa.BigInteger, nullable=False),
         _created_at(),
-        sa.CheckConstraint("amount_cents > 0 AND recovered_cents >= 0", name="ck_chargeback_amount"),
+        sa.CheckConstraint(
+            "amount_cents > 0 AND recovered_cents >= 0", name="ck_chargeback_amount"
+        ),
     )
     op.create_table(
         "financial_recovery_claims",

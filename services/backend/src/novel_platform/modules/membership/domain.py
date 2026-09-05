@@ -11,10 +11,107 @@ class AccessMode(StrEnum):
     VIP_REQUIRED = "VIP_REQUIRED"
 
 
+class TicketType(StrEnum):
+    RECOMMEND = "RECOMMEND"
+    MONTHLY = "MONTHLY"
+
+
+class TicketRiskStatus(StrEnum):
+    NORMAL = "NORMAL"
+    FROZEN = "FROZEN"
+    INVALIDATED = "INVALIDATED"
+
+
 @dataclass(frozen=True, slots=True)
 class ChapterPolicy:
     price_coin: int
     access_mode: AccessMode = AccessMode.VIP_REQUIRED
+
+
+@dataclass(frozen=True, slots=True)
+class MembershipPlan:
+    plan_code: str
+    name: str
+    version: int
+    duration_days: int
+    price_cents: int
+    daily_recommend_tickets: int
+    monthly_chapter_tickets: int
+    status: str = "ACTIVE"
+
+
+@dataclass(frozen=True, slots=True)
+class MembershipOrder:
+    id: str
+    payment_no: str
+    account_id: str
+    plan_code: str
+    plan_version: int
+    channel: str
+    price_cents: int
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class TicketBalance:
+    account_id: str
+    recommend: int = 0
+    monthly: int = 0
+
+    def for_type(self, ticket_type: TicketType) -> int:
+        return self.recommend if ticket_type is TicketType.RECOMMEND else self.monthly
+
+
+@dataclass(frozen=True, slots=True)
+class BookTicketVote:
+    id: str
+    account_id: str
+    book_id: str
+    ticket_type: TicketType
+    quantity: int
+    risk_status: TicketRiskStatus
+    idempotency_key: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class GiftDefinition:
+    gift_code: str
+    name: str
+    price_coin: int
+    fan_value: int
+    spend_mode: str = "GIFT_AND_RECHARGE"
+
+
+@dataclass(frozen=True, slots=True)
+class GiftOrder:
+    id: str
+    account_id: str
+    book_id: str
+    author_id: str
+    gift_code: str
+    quantity: int
+    total_coin: int
+    income_base_coin: int
+    fan_value: int
+    status: str
+    idempotency_key: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class FanProfile:
+    account_id: str
+    book_id: str
+    value: int
+    level: int
+
+
+@dataclass(frozen=True, slots=True)
+class UserGrowthProfile:
+    account_id: str
+    points: int
+    level: int
 
 
 class MembershipService:
