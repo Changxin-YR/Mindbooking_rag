@@ -18,6 +18,25 @@ class AccessDecision:
     allowed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class TtsSegment:
+    index: int
+    text: str
+    start_ms: int
+    end_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class TtsMetadata:
+    book_id: str
+    chapter_id: str
+    access: AccessResult
+    voice: str
+    speed: float
+    provider: str
+    segments: tuple[TtsSegment, ...]
+
+
 @dataclass(slots=True)
 class ReadingProgress:
     account_id: str

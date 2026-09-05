@@ -1,3 +1,4 @@
+import re
 from dataclasses import replace
 
 from novel_platform.modules.content.domain import CommercialPolicy
@@ -6,6 +7,8 @@ from novel_platform.modules.reading.domain import (
     AccessResult,
     ProgressConflict,
     ReadingProgress,
+    TtsMetadata,
+    TtsSegment,
 )
 
 
@@ -41,6 +44,36 @@ class ContentAccessService:
 class ReadingService:
     def __init__(self) -> None:
         self._progress: dict[tuple[str, str], ReadingProgress] = {}
+
+    @staticmethod
+    def build_tts_metadata(
+        *,
+        book_id: str,
+        chapter_id: str,
+        content: str,
+        access: AccessResult,
+        voice: str,
+        speed: float,
+    ) -> TtsMetadata:
+        if not content.strip():
+            segments: tuple[TtsSegment, ...] = ()
+        else:
+            parts = tuple(
+                part.strip() for part in re.split(r"(?<=[。！？!?；;\n])", content) if part.strip()
+            )
+            segments = tuple(
+                TtsSegment(index, part, index * 500, (index + 1) * 500)
+                for index, part in enumerate(parts)
+            )
+        return TtsMetadata(
+            book_id=book_id,
+            chapter_id=chapter_id,
+            access=access,
+            voice=voice,
+            speed=speed,
+            provider="deterministic",
+            segments=segments,
+        )
 
     def get_progress(self, account_id: str, book_id: str) -> ReadingProgress:
         return self._progress.get((account_id, book_id), ReadingProgress(account_id, book_id))

@@ -31,6 +31,20 @@ paths:
       responses:
         '201': {description: Rating version created}
         '422': {description: Rating eligibility or score validation failed}
+  /api/v1/books/{book_id}/chapters/{chapter_id}/tts:
+    get:
+      operationId: reader_get_chapter_tts
+      parameters:
+        - {name: book_id, in: path, required: true, schema: {type: string}}
+        - {name: chapter_id, in: path, required: true, schema: {type: string}}
+        - {name: account_id, in: query, required: false, schema: {type: string}}
+        - {name: voice, in: query, required: false, schema: {type: string, enum: [female-1, female-2, male-1, male-2], default: female-1}}
+        - {name: speed, in: query, required: false, schema: {type: number, enum: [0.75, 1.0, 1.25, 1.5, 2.0], default: 1.0}}
+      responses:
+        '200': {description: Deterministic basic TTS playback segments after chapter access check}
+        '403': {description: Chapter access denied or provider unavailable}
+        '404': {description: Book or chapter is not public}
+        '422': {description: Unsupported voice or playback speed}
   /api/v1/social/follows:
     post:
       operationId: reader_follow_target
