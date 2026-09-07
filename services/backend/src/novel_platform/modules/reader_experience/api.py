@@ -11,6 +11,7 @@ from novel_platform.modules.content.domain import (
     BookLifecycle,
     BookMetadataVersion,
     CommercialPolicy,
+    is_readable_chapter,
 )
 from novel_platform.modules.reader_experience.application import ReaderExperienceService
 from novel_platform.modules.reader_experience.domain import CorrectionKind
@@ -57,6 +58,20 @@ class FollowRequest(BaseModel):
     target_id: str = Field(min_length=1)
 
 
+class FollowItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_type: str
+    target_id: str
+
+
+class FollowingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    items: list[FollowItemResponse]
+
+
 class GrowthRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -97,6 +112,10 @@ def _catalog_item(book: Book, metadata: BookMetadataVersion) -> CatalogItemRespo
     )
 
 
+def _book_has_readable_chapter(content: ContentService, book_id: str) -> bool:
+    return any(is_readable_chapter(chapter) for chapter in content.list_chapters(book_id))
+
+
 def build_reader_experience_router(
     content: ContentService, service: ReaderExperienceService, *, auth_required: bool = False
 ) -> APIRouter:
@@ -121,6 +140,7 @@ def build_reader_experience_router(
                 commercial_policy=commercial_policy,
                 keyword=q,
             )
+            if _book_has_readable_chapter(content, book.id)
         ]
         return CatalogResponse(items=items, total=len(items))
 
@@ -159,12 +179,37 @@ def build_reader_experience_router(
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
-    @router.get("/accounts/{account_id}/follows")
+    @router.get("/accounts/{account_id}/follows", response_model=FollowingResponse)
     def following(
         account_id: str, session: SessionClaims | None = Depends(optional_session)
+    ) -> FollowingResponse:
+        require_account_access(session, account_id, required=auth_required)
+        return FollowingResponse(
+            account_id=account_id,
+            items=[
+                FollowItemResponse(target_type=target_type, target_id=target_id)
+                for target_type, target_id in service.following(account_id)
+            ],
+        )
+
+    @router.get("/social/follows/status", response_model=dict[str, object])
+    def follow_status(
+        account_id: str,
+        target_type: str,
+        target_id: str,
+        session: SessionClaims | None = Depends(optional_session),
     ) -> dict[str, object]:
         require_account_access(session, account_id, required=auth_required)
-        return {"account_id": account_id, "items": service.following(account_id)}
+        try:
+            following = service.is_following(account_id, target_type, target_id)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        return {
+            "account_id": account_id,
+            "target_type": target_type,
+            "target_id": target_id,
+            "following": following,
+        }
 
     @router.post("/accounts/growth/events", status_code=status.HTTP_201_CREATED)
     def add_growth(

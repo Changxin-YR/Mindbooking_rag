@@ -6,6 +6,7 @@ const environment = (globalThis as typeof globalThis & {
 
 export default defineNuxtConfig({
   srcDir: 'app/',
+  app: { baseURL: environment?.NUXT_APP_BASE_URL || '/' },
   compatibilityDate: '2026-09-04',
   devtools: { enabled: false },
   typescript: { strict: true, typeCheck: false },

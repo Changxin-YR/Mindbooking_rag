@@ -7,6 +7,7 @@ from novel_platform.modules.reading.domain import (
     AccessResult,
     ProgressConflict,
     ReadingProgress,
+    ReadingPreferences,
     TtsMetadata,
     TtsSegment,
 )
@@ -44,6 +45,20 @@ class ContentAccessService:
 class ReadingService:
     def __init__(self) -> None:
         self._progress: dict[tuple[str, str], ReadingProgress] = {}
+        self._preferences: dict[str, ReadingPreferences] = {}
+
+    def get_preferences(self, account_id: str) -> ReadingPreferences:
+        return self._preferences.get(account_id, ReadingPreferences(account_id))
+
+    def update_preferences(self, account_id: str, **values: object) -> ReadingPreferences:
+        current = self.get_preferences(account_id)
+        allowed = {field for field in ReadingPreferences.__dataclass_fields__ if field != "account_id"}
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"unsupported reading preference: {sorted(unknown)[0]}")
+        updated = ReadingPreferences(account_id, **{field: values.get(field, getattr(current, field)) for field in allowed})
+        self._preferences[account_id] = updated
+        return updated
 
     @staticmethod
     def build_tts_metadata(
@@ -79,6 +94,8 @@ class ReadingService:
         return self._progress.get((account_id, book_id), ReadingProgress(account_id, book_id))
 
     def start_session(self, account_id: str, book_id: str, session_id: str) -> ReadingProgress:
+        if not session_id.strip():
+            raise ValueError("SESSION_ID_REQUIRED")
         progress = self.get_progress(account_id, book_id)
         progress.current_session_id = session_id
         self._progress[(account_id, book_id)] = progress

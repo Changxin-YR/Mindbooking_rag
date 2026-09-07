@@ -48,12 +48,11 @@ class OperationService:
         return items
 
     def public_rankings(self, kind: RankingKind = RankingKind.ALGORITHM) -> tuple[RankingItem, ...]:
-        return tuple(
-            sorted(
-                (item for item in self.rankings.values() if item.kind is kind),
-                key=lambda item: item.rank,
-            )
-        )
+        items = [item for item in self.rankings.values() if item.kind is kind]
+        if not items:
+            return ()
+        latest_snapshot = items[-1].snapshot_id
+        return tuple(sorted((item for item in items if item.snapshot_id == latest_snapshot), key=lambda item: item.rank))
 
     def editorial_slot(self, book_id: str, position: int, snapshot_id: str) -> RankingItem:
         if position < 1:

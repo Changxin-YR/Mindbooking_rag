@@ -51,6 +51,21 @@ class ReadingProgress:
     current_session_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ReadingPreferences:
+    account_id: str
+    mode: str = "scroll"
+    font_family: str = "serif"
+    font_size: int = 18
+    font_weight: int = 400
+    line_height: float = 2.0
+    paragraph_spacing: float = 1.25
+    content_width: int = 760
+    background: str = "cream"
+    auto_scroll_speed: float = 1.0
+    auto_subscribe: bool = False
+
+
 class ProgressConflict(ValueError):
     def __init__(self, current: ReadingProgress) -> None:
         super().__init__("reading progress revision conflict")

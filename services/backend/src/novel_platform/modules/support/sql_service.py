@@ -60,6 +60,15 @@ class SqlSupportService(SupportService):
         with self.engine.begin() as connection:
             return self._ticket_from_connection(connection, ticket_id)
 
+    def list_tickets(self, account_id: str) -> list[SupportTicket]:
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                sa.select(self._tickets.c.id)
+                .where(self._tickets.c.account_id == account_id)
+                .order_by(self._tickets.c.created_at, self._tickets.c.id)
+            )
+            return [self._ticket_from_connection(connection, str(row.id)) for row in rows]
+
     def resolve(self, ticket_id: str) -> SupportTicket:
         with self.engine.begin() as connection:
             ticket = self._ticket_from_connection(connection, ticket_id, lock=True)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bookDetailPath, catalogPath, chapterPath, progressPath } from '../src/catalog'
+import { bookDetailPath, catalogPath, chapterPath, progressPath, rankingPath, searchPath } from '../src/catalog'
 
 describe('reader catalog path', () => {
   it('serializes only supplied filters for the public API', () => {
@@ -16,5 +16,23 @@ describe('reader domain paths', () => {
     expect(progressPath('book-1', 'http://localhost:8000')).toBe(
       'http://localhost:8000/api/v1/books/book-1/progress',
     )
+  })
+
+  it('supports the frozen library dimensions without constructing SQL in the browser', () => {
+    expect(catalogPath({ channel: 'FEMALE', lifecycle: 'COMPLETED', commercial_policy: 'FREE' })).toBe(
+      '/api/v1/books?channel=FEMALE&lifecycle=COMPLETED&commercial_policy=FREE',
+    )
+  })
+})
+
+describe('reader search and ranking paths', () => {
+  it('keeps search inside the reader API and preserves filters', () => {
+    expect(searchPath({ q: '斗破', category: '玄幻', status: 'SERIALIZING' })).toBe(
+      '/api/v1/search?q=%E6%96%97%E7%A0%B4&category=%E7%8E%84%E5%B9%BB&status=SERIALIZING',
+    )
+  })
+
+  it('builds ranking route without an external host', () => {
+    expect(rankingPath('hot', 'http://localhost:8000')).toBe('http://localhost:8000/api/v1/rankings?kind=hot')
   })
 })

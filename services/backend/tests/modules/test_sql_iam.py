@@ -21,6 +21,9 @@ def _repository() -> SqlIdentityRepository:
         metadata,
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column("status", sa.String(32), nullable=False),
+        sa.Column("account_no", sa.String(32), unique=True),
+        sa.Column("nickname", sa.String(64)),
+        sa.Column("login_name", sa.String(32), unique=True),
     )
     sa.Table(
         "login_identity_accounts",

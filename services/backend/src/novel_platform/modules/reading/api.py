@@ -1,11 +1,14 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from novel_platform.core.auth import SessionClaims
 from novel_platform.core.http_auth import optional_session, require_account_access
+from novel_platform.modules.content.application import ContentService
 from novel_platform.modules.membership.domain import AccessMode, ChapterPolicy
 from novel_platform.modules.reading.application import ContentAccessService, ReadingService
-from novel_platform.modules.reading.domain import ProgressConflict, TtsMetadata
+from novel_platform.modules.reading.domain import ProgressConflict, ReadingPreferences, TtsMetadata
 
 
 class ProgressRequest(BaseModel):
@@ -15,6 +18,12 @@ class ProgressRequest(BaseModel):
     chapter_number: int
     position: int
     expected_revision: int
+    session_id: str
+
+
+class SessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     session_id: str
 
 
@@ -54,6 +63,25 @@ class TtsResponse(BaseModel):
     segments: list[TtsSegmentResponse]
 
 
+class ReadingPreferencesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["scroll", "paged"] = "scroll"
+    font_family: Literal["serif", "sans"] = "serif"
+    font_size: int = Field(default=18, ge=14, le=48)
+    font_weight: Literal[400, 500, 600] = 400
+    line_height: float = Field(default=2.0, ge=1.2, le=3.0)
+    paragraph_spacing: float = Field(default=1.25, ge=0.25, le=3.0)
+    content_width: int = Field(default=760, ge=400, le=1200)
+    background: Literal["white", "cream", "eye", "gray", "dark"] = "cream"
+    auto_scroll_speed: float = Field(default=1.0, gt=0, le=10)
+    auto_subscribe: bool = False
+
+
+class ReadingPreferencesResponse(ReadingPreferencesRequest):
+    account_id: str
+
+
 def _response(progress: object) -> ProgressResponse:
     return ProgressResponse.model_validate(progress, from_attributes=True)
 
@@ -91,7 +119,12 @@ def _chapter_policy(request: Request, chapter_id: str) -> ChapterPolicy:
     return ChapterPolicy(1, AccessMode.VIP_REQUIRED)
 
 
-def build_reading_router(service: ReadingService, *, auth_required: bool = False) -> APIRouter:
+def build_reading_router(
+    service: ReadingService,
+    *,
+    auth_required: bool = False,
+    content: ContentService | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api/v1", tags=["reader-reading"])
 
     @router.get(
@@ -213,6 +246,20 @@ def build_reading_router(service: ReadingService, *, auth_required: bool = False
         require_account_access(session, account_id, required=auth_required)
         return _response(service.get_progress(account_id, book_id))
 
+    @router.get("/accounts/{account_id}/reading-preferences", response_model=ReadingPreferencesResponse, operation_id="reader_get_reading_preferences")
+    def get_reading_preferences(account_id: str, session: SessionClaims | None = Depends(optional_session)) -> ReadingPreferencesResponse:
+        require_account_access(session, account_id, required=auth_required)
+        return ReadingPreferencesResponse.model_validate(service.get_preferences(account_id), from_attributes=True)
+
+    @router.put("/accounts/{account_id}/reading-preferences", response_model=ReadingPreferencesResponse, operation_id="reader_update_reading_preferences")
+    def update_reading_preferences(account_id: str, payload: ReadingPreferencesRequest, session: SessionClaims | None = Depends(optional_session)) -> ReadingPreferencesResponse:
+        require_account_access(session, account_id, required=auth_required)
+        try:
+            updated = service.update_preferences(account_id, **payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return ReadingPreferencesResponse.model_validate(updated, from_attributes=True)
+
     @router.put(
         "/books/{book_id}/progress",
         response_model=ProgressResponse,
@@ -226,6 +273,10 @@ def build_reading_router(service: ReadingService, *, auth_required: bool = False
     ) -> ProgressResponse:
         require_account_access(session, account_id, required=auth_required)
         try:
+            if content is not None:
+                chapter = content.get_chapter_for_book(book_id, payload.chapter_id)
+                if chapter.number != payload.chapter_number:
+                    raise ValueError("chapter number does not match book chapter")
             progress = service.update_progress(
                 account_id,
                 book_id,
@@ -247,5 +298,22 @@ def build_reading_router(service: ReadingService, *, auth_required: bool = False
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return _response(progress)
+
+    @router.post(
+        "/books/{book_id}/progress/session",
+        response_model=ProgressResponse,
+        operation_id="reader_start_progress_session",
+    )
+    def start_progress_session(
+        book_id: str,
+        account_id: str,
+        payload: SessionRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> ProgressResponse:
+        require_account_access(session, account_id, required=auth_required)
+        try:
+            return _response(service.start_session(account_id, book_id, payload.session_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return router
