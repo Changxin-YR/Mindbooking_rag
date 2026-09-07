@@ -16,8 +16,8 @@ Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真�
 - Agent/管理系统实现提交：5203fd4（含前序 94d8dd9、67beaed）
 - 环境：Windows、Python 3.x、Node 24、pnpm 11.22.0；时间：2026-09-08（Asia/Shanghai）
 - Validated implementation SHA：`90a1ab0ffabdaf0788843c256bfc51febd50af28`
-- Final documentation commit：当前工作区 docs-only 提交（待网络恢复后推送；不改变上述实现证据）
-- 远端 PR head（本轮最后可验证）：`90a1ab0ffabdaf0788843c256bfc51febd50af28`
+- Final documentation commit：已推送至 PR #1 当前 head（docs-only；不改变上述实现证据）
+- 远端 PR head：以 PR #1 当前 head 为准
 - PR：<https://github.com/Changxin-YR/Mindbooking_rag/pull/1>
 - Latest passing CI（validated implementation）：<https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708>
 - Docker Compose：MySQL、Backend、Admin、Reader、Writer、Harness、OpenSearch、Redis、RabbitMQ、ClickHouse、MinIO、Nginx 全部 healthy；Alembic head=`0042_agent_audit_pending_action`
