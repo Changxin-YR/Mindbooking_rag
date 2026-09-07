@@ -197,6 +197,31 @@ class AgentGateway:
             return self._pending_store.get(action_id)
         return self._pending.get(action_id)
 
+    def audit_denied_instruction(
+        self,
+        *,
+        agent_id: str,
+        actor_id: str,
+        session_id: str | None,
+        request_id: str | None,
+        instruction: str,
+        reason: str,
+    ) -> None:
+        self._audit(
+            AgentToolCall(
+                agent_id=agent_id,
+                actor_id=actor_id,
+                tool_name="agent.orchestrator",
+                arguments={"instruction": instruction[:20_000]},
+                session_id=session_id,
+                request_id=request_id,
+            ),
+            "agent.execute",
+            "DENIED",
+            reason,
+            risk_level="HIGH",
+        )
+
     def _save_pending(self, action: PendingAction) -> None:
         if self._pending_store is not None:
             self._pending_store.save(action)

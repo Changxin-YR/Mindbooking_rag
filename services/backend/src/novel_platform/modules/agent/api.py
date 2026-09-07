@@ -282,6 +282,14 @@ def _orchestrate_local(
         "隐藏管理员",
     )
     if any(marker in lowered for marker in injection_markers):
+        gateway.audit_denied_instruction(
+            agent_id=f"agt_{session['id']}",
+            actor_id=claims.account_id,
+            session_id=claims.session_id,
+            request_id=current_request_id(),
+            instruction=message,
+            reason="prompt_injection_detected",
+        )
         return "我只能使用当前 Staff 会话被授予的工具和数据范围。", None, None
 
     context = _agent_context(request, claims)

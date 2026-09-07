@@ -52,7 +52,10 @@ def test_fake_agent_prompt_injection_never_executes_a_tool(monkeypatch) -> None:
     )
     assert response.status_code == 200
     assert "当前 Staff 会话" in response.json()["response"]
-    assert client.app.state.agent_audit_sink.reload() == ()
+    assert any(
+        item.reason == "prompt_injection_detected"
+        for item in client.app.state.agent_audit_sink.reload()
+    )
 
 
 def test_agent_http_uses_authenticated_actor_and_resource_scope(monkeypatch) -> None:
