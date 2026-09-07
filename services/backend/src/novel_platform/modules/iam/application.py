@@ -94,6 +94,10 @@ class IdentityApplication:
             raise AccountNotFoundError("account does not exist")
         return account
 
+    def phone_for_account(self, account_id: str) -> str | None:
+        self.profile_for_account(account_id)
+        return self.repository.phone_for_account(account_id)
+
     def update_profile(
         self,
         account_id: str,

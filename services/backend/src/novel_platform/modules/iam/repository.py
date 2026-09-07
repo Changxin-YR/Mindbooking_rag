@@ -34,6 +34,8 @@ class IdentityRepository(Protocol):
 
     def account_for_id(self, account_id: str) -> PlatformAccount | None: ...
 
+    def phone_for_account(self, account_id: str) -> str | None: ...
+
     def update_account_profile(
         self, account_id: str, *, nickname: str | None = None, login_name: str | None = None
     ) -> PlatformAccount: ...
@@ -101,6 +103,15 @@ class InMemoryIdentityRepository:
     def account_for_id(self, account_id: str) -> PlatformAccount | None:
         with self._guard:
             return self._accounts.get(account_id)
+
+    def phone_for_account(self, account_id: str) -> str | None:
+        with self._guard:
+            for identity_id, account_ids in self._accounts_by_identity.items():
+                if account_id in account_ids:
+                    for phone, identity in self._identity_by_phone.items():
+                        if identity.id == identity_id:
+                            return phone
+        return None
 
     def update_account_profile(
         self, account_id: str, *, nickname: str | None = None, login_name: str | None = None
@@ -373,6 +384,21 @@ class SqlIdentityRepository:
                 str(row["nickname"]) if row["nickname"] is not None else None,
                 str(row["login_name"]) if row["login_name"] is not None else None,
             )
+
+    def phone_for_account(self, account_id: str) -> str | None:
+        with self.engine.begin() as connection:
+            return connection.execute(
+                sa.select(login_identities.c.normalized_value)
+                .select_from(
+                    login_identities.join(
+                        login_identity_accounts,
+                        login_identities.c.id == login_identity_accounts.c.identity_id,
+                    )
+                )
+                .where(login_identity_accounts.c.account_id == account_id)
+                .order_by(login_identities.c.id)
+                .limit(1)
+            ).scalar_one_or_none()
     def update_account_profile(
         self, account_id: str, *, nickname: str | None = None, login_name: str | None = None
     ) -> PlatformAccount:

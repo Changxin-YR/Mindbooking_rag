@@ -23,6 +23,12 @@ describe('reader domain paths', () => {
       '/api/v1/books?channel=FEMALE&lifecycle=COMPLETED&commercial_policy=FREE',
     )
   })
+
+  it('serializes numeric catalog filters without throwing', () => {
+    expect(catalogPath({ min_word_count: 1000000, max_word_count: 2000000 })).toBe(
+      '/api/v1/books?min_word_count=1000000&max_word_count=2000000',
+    )
+  })
 })
 
 describe('reader search and ranking paths', () => {

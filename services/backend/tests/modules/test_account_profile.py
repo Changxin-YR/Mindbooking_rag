@@ -40,6 +40,7 @@ def test_account_profile_http_is_account_scoped_and_login_name_unique() -> None:
     profile = client.get(f"/api/v1/iam/accounts/{account}/profile", headers=headers)
     assert profile.status_code == 200
     assert profile.json()["account_no"].startswith("MB")
+    assert profile.json()["phone"] == "13800138071"
     assert client.get(f"/api/v1/iam/accounts/{account}/profile").status_code == 401
 
     updated = client.patch(

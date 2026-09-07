@@ -197,6 +197,7 @@ export interface AccountProfileDto {
   status: string
   nickname: string | null
   login_name: string | null
+  phone: string | null
 }
 
 export interface PrivacyRequestDto {

@@ -49,7 +49,7 @@ paths:
       parameters:
         - {name: account_id, in: path, required: true, schema: {type: string}}
       responses:
-        '200': {description: Account public number and editable profile fields}
+        '200': {description: Account public number, linked phone source, and editable profile fields}
     patch:
       operationId: update_account_profile
       parameters:

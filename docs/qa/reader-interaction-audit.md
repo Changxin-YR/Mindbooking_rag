@@ -15,4 +15,7 @@
 | 榜单完整榜单/说明 | 首页、排行榜 | 静态 UI 无响应 | `/rankings/:kind` 与说明弹窗 | Ranking API | 已实现 |
 | 钱包充值 | 钱包 | 内部 code 泄漏、实名无入口 | 中文产品名、REAL_NAME_REQUIRED 弹窗 | Recharge + RealName API | 已实现 |
 | 客服分类/提交 | 客服 | 选择不回显、仅 Toast | code 绑定、编号回显、刷新读取列表 | Support Ticket API | 已实现 |
-| 账号资料 | 账户设置 | 只展示随机内部 ID，昵称/登录名无法修改 | 展示稳定 account_no，并通过受权限保护的 profile API 更新昵称/登录名 | `GET/PATCH /api/v1/iam/accounts/{account_id}/profile` | 已实现 |
+| 账号资料 | 账户设置 | 只展示随机内部 ID，昵称/登录名无法修改 | 展示稳定 account_no、手机号掩码，并通过受权限保护的 profile API 更新昵称/登录名 | `GET/PATCH /api/v1/iam/accounts/{account_id}/profile` | 已实现 |
+| 账号安全/隐私 | 账户设置 | 修改密码、注销、当前设备会话没有 Reader 入口 | 接入密码更新、当前 Session 撤销和隐私注销申请 | IAM + Privacy API | 已实现 |
+| 书架作品投影 | 书架 | 详情请求失败会覆盖真实书架作品信息 | 优先显示 Library API 返回的标题、简介和可用性 | `GET /api/v1/bookshelf` | 已实现 |
+| 数字筛选参数 | 书库/搜索路径 | 数字字数筛选调用 `.trim()` 导致前端异常 | URL 参数统一字符串化 | Reader catalog helper | 已实现 |

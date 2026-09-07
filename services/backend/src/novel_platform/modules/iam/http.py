@@ -61,6 +61,7 @@ class AccountProfileResponse(BaseModel):
     status: str
     nickname: str | None = None
     login_name: str | None = None
+    phone: str | None = None
 
 
 class UpdateAccountProfileRequest(BaseModel):
@@ -212,6 +213,7 @@ def build_iam_router(application: IdentityApplication, *, auth_required: bool = 
             status=account.status.value,
             nickname=account.nickname,
             login_name=account.login_name,
+            phone=application.phone_for_account(account_id),
         )
 
     @router.get(
@@ -273,6 +275,7 @@ def build_iam_router(application: IdentityApplication, *, auth_required: bool = 
             status=account.status.value,
             nickname=account.nickname,
             login_name=account.login_name,
+            phone=application.phone_for_account(account_id),
         )
 
     @router.post("/iam/identities/phone/{phone}/route", status_code=status.HTTP_204_NO_CONTENT)
