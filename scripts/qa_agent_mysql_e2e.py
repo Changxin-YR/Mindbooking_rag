@@ -301,6 +301,14 @@ def run(base: str, staff_code: str, staff_password: str) -> None:
             )
         if manual_after["version_links"] != agent_after["version_links"]:
             raise RuntimeError("manual/agent review association mismatch")
+        manual_outbox_delta = (
+            manual_after["outbox_total"] - manual_before["outbox_total"]
+        )
+        agent_outbox_delta = agent_after["outbox_total"] - agent_before["outbox_total"]
+        if manual_outbox_delta != agent_outbox_delta:
+            raise RuntimeError(
+                f"manual/agent Outbox mismatch: {manual_outbox_delta} != {agent_outbox_delta}"
+            )
 
         with connection.cursor() as cursor:
             cursor.execute(
@@ -326,10 +334,8 @@ def run(base: str, staff_code: str, staff_password: str) -> None:
                     "agent": agent_after,
                     "pending_action": pending_status_db,
                     "audit": tuple(audit),
-                    "outbox_delta_manual": manual_after["outbox_total"]
-                    - manual_before["outbox_total"],
-                    "outbox_delta_agent": agent_after["outbox_total"]
-                    - agent_before["outbox_total"],
+                    "outbox_delta_manual": manual_outbox_delta,
+                    "outbox_delta_agent": agent_outbox_delta,
                 },
                 ensure_ascii=False,
                 default=str,
