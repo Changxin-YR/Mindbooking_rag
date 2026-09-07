@@ -127,9 +127,7 @@ class SqlAgentAuditSink:
             risk_level=str(row.get("risk_level", "LOW")),
             request_id=str(row["request_id"]) if row.get("request_id") is not None else None,
             pending_action_id=(
-                str(row["pending_action_id"])
-                if row.get("pending_action_id") is not None
-                else None
+                str(row["pending_action_id"]) if row.get("pending_action_id") is not None else None
             ),
         )
 
