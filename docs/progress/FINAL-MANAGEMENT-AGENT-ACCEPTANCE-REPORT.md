@@ -13,7 +13,7 @@
 - 远端基准：ec31dde34ce4f28b124041cefa9adfc09fc68345
 - 工作分支：codex/v1.2-full-audit
 - CI 修复提交：55e4090 fix(ci): restore reproducible quality gates
-- 最终 Commit：提交后回填
+- Agent/管理系统实现提交：67beaed
 - 环境：Windows、Python 3.x、Node 24、pnpm 11.22.0；时间：2026-09-07（Asia/Shanghai）
 
 ## 已修复
@@ -38,7 +38,7 @@
 
 | Gate | 命令/场景 | 结果 |
 | --- | --- | --- |
-| Backend | python -m pytest -q | 343 passed, 0 failed, 0 skipped |
+| Backend | python -m pytest -q | 344 passed, 0 failed, 0 skipped |
 | Formatting | python -m ruff format --check src tests alembic | PASS |
 | Lint | python -m ruff check src tests alembic | PASS |
 | Types | python -m mypy src | PASS, 146 source files |
@@ -49,7 +49,7 @@
 | Agent targeted | all tests/modules/test_agent*.py | 26 targeted tests PASS |
 | Browser smoke | local FastAPI + Admin Vite + Playwright: login → Agent session → query | PASS |
 
-本次测试共 343 个后端测试通过，无 skip；pytest 仅有第三方弃用警告。
+本次测试共 344 个后端测试通过，无 skip；pytest 仅有第三方弃用警告。
 
 ## 关键安全与业务不变量
 
