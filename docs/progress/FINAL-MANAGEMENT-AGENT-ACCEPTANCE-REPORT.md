@@ -1,20 +1,24 @@
 # Management and Agent Acceptance Report
 
-更新时间：2026-09-07
+更新时间：2026-09-08
 
 ## 结论
 
 **B：有条件通过。**
 
-核心代码门禁、认证链、Tool 权限/DataScope、真实业务 Service 边界、PendingAction 确认和本地 Admin Agent 浏览器链已通过。Docker daemon 当前不可用，无法在本次环境重新执行 MySQL/Compose E2E；DeepSeek live credentials 也未提供。两者均保留为外部验证项，Sandbox/Fake 路径已验证。
+最终 SHA 已推送并通过远端 Foundation、Backend、Frontend 三道 CI。Docker Compose、MySQL、Harness 均已健康，完整 QA 与新增真实 MySQL Agent 写入/人工等价验收通过。唯一仍不能伪造为 PASS 的条件是未提供 DeepSeek live credential；生产支付/银行/税务 Provider 仍是 Sandbox PASS、生产未认证。
 
 ## 变更基线
 
 - 远端基准：ec31dde34ce4f28b124041cefa9adfc09fc68345
 - 工作分支：codex/v1.2-full-audit
 - CI 修复提交：55e4090 fix(ci): restore reproducible quality gates
-- Agent/管理系统实现提交：37fb3b8（含前序 94d8dd9、67beaed）
-- 环境：Windows、Python 3.x、Node 24、pnpm 11.22.0；时间：2026-09-07（Asia/Shanghai）
+- Agent/管理系统实现提交：5203fd4（含前序 94d8dd9、67beaed）
+- 环境：Windows、Python 3.x、Node 24、pnpm 11.22.0；时间：2026-09-08（Asia/Shanghai）
+- 第二轮验证代码 SHA：`2732fefa1cb4a8bd5baca67fdf45e9aa91622e3b`
+- PR：<https://github.com/Changxin-YR/Mindbooking_rag/pull/1>
+- Exact-SHA CI：<https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34144985623>
+- Docker Compose：MySQL、Backend、Admin、Reader、Writer、Harness、OpenSearch、Redis、RabbitMQ、ClickHouse、MinIO、Nginx 全部 healthy；Alembic head=`0042_agent_audit_pending_action`
 
 ## 已修复
 
@@ -39,18 +43,29 @@
 
 | Gate | 命令/场景 | 结果 |
 | --- | --- | --- |
-| Backend | python -m pytest -q | 345 passed, 0 failed, 0 skipped |
+| Backend | python -m pytest -q | 357 passed, 0 failed, 0 skipped |
 | Formatting | python -m ruff format --check src tests alembic | PASS |
 | Lint | python -m ruff check src tests alembic | PASS |
 | Types | python -m mypy src | PASS, 146 source files |
-| Alembic | alembic upgrade head --sql | PASS, head 0040_agent_pending_actions |
+| Alembic | Compose MySQL `alembic upgrade head` | PASS, head `0042_agent_audit_pending_action` |
 | Frontend tests | pnpm -r test | PASS |
 | Frontend typecheck | pnpm -r typecheck | PASS |
 | Frontend builds | pnpm -r build | Reader/Writer/Admin PASS |
-| Agent targeted | all tests/modules/test_agent*.py | 26 targeted tests PASS |
+| Agent targeted | Agent/session/security tests | PASS |
 | Browser smoke | local FastAPI + Admin Vite + Playwright: login → Agent session → query | PASS |
+| Compose QA | `qa_compose_smoke.py`, `qa_v12_smoke.py`, `qa_writer_editor_smoke.py`, `qa_sql_commercial_e2e.py`, `qa_mysql_concurrency.py`, `qa_mysql_load.py`, `qa_role_e2e.py`, `qa_harness_e2e.py`, `qa_advanced_workflows.py` | ALL PASS |
+| Agent MySQL E2E | `scripts/qa_agent_mysql_e2e.py` | PASS：人工/Agent review 语义相等；PendingAction `EXECUTED`；SQL Agent Audit 已关联 |
+| Frontend | `pnpm -r test`、`pnpm -r typecheck`、`pnpm -r build` | PASS |
 
-本次测试共 345 个后端测试通过，无 skip；pytest 仅有第三方弃用警告。
+## 第二轮 Exact-SHA CI
+
+| Workflow | Run / Job | 结论 |
+| --- | --- | --- |
+| Foundation | [run 34144985623](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34144985623) / Foundation configuration | PASS |
+| Backend | [run 34144985623](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34144985623) / Backend tests and quality | PASS (`357 passed`) |
+| Frontend | [run 34144985623](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34144985623) / Frontend tests and builds | PASS |
+
+本轮后端测试共 357 个通过，无 skip；pytest 仅有第三方弃用警告。
 
 ## 关键安全与业务不变量
 
@@ -67,16 +82,17 @@
 | 项目 | 状态 | 证据/原因 |
 | --- | --- | --- |
 | LIVE_LLM | BLOCKED_BY_CREDENTIAL | 未提供 DeepSeek API credential；Fake adapter 已通过 |
-| MySQL Agent E2E | ENVIRONMENT_BLOCKER | Docker daemon 未运行；本地 SQL migration/static SQL 和 SQLite SQL PendingAction 已通过 |
-| Compose/Browser full role E2E | ENVIRONMENT_BLOCKER | 依赖 Docker services；本地 Admin Agent Playwright smoke 已通过 |
+| MySQL Agent E2E | PASS | `scripts/qa_agent_mysql_e2e.py` 通过人工/Agent 审核等价、PendingAction/Audit 持久化核对 |
+| Compose/Browser full role E2E | PASS | Compose smoke、Harness browser E2E、Reader/Writer/Admin builds 全部通过 |
 | Production payment/payout/tax | SANDBOX PASS / NOT CERTIFIED | 真实第三方凭据与生产政策不在当前环境 |
-| Multi-instance session continuity | NOT CERTIFIED | 业务 PendingAction 已持久化；Agent session message context 仍是进程运行时上下文 |
+| Session restart / second runtime | PASS | SQL session store 重建后恢复消息、实体上下文并保持 Staff 隔离 |
+| Multi-instance logical context | PASS（logical SQL store） | 两个独立 `SqlAgentSessionStore` 实例共享 SQL session/message/context；并发版本冲突返回 `409 AGENT_SESSION_VERSION_CONFLICT`。未宣称生产容量/DR。 |
 
 ## Gate 判定
 
-- Gate 1 管理系统：本地 API/UI/DB 适配器 PASS；完整 Compose MySQL 复验受环境阻塞。
+- Gate 1 管理系统：API/UI/真实 Compose MySQL/SQL PASS。
 - Gate 2 Agent：Fake NLU、Tool、授权写、结果验证、审计 PASS。
 - Gate 3 权限安全：RBAC、DataScope、actor 防伪、注入拒绝、确认重放保护 PASS。
-- Gate 4 真实业务：本地人工/Agent 链 PASS；真实 MySQL 与生产 Harness 需外部环境复验。
+- Gate 4 真实业务：人工、Agent、Hybrid、真实 MySQL Agent 等价链 PASS；Live DeepSeek 仍待 credential。
 
-当前不存在已复现的 P0/P1 代码缺陷；交付状态保持 B，直到 Docker/MySQL 和 live DeepSeek 凭据验证完成。
+当前不存在已复现的 P0/P1 代码缺陷。因用户要求真实 DeepSeek 智能体验收，`LIVE_LLM=BLOCKED_BY_CREDENTIAL`，最终等级保持严格 B；平台架构、Fake Harness、RBAC/DataScope、MySQL 和浏览器验收均已通过。
