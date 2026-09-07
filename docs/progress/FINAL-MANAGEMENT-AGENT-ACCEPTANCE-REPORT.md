@@ -13,7 +13,7 @@
 - 远端基准：ec31dde34ce4f28b124041cefa9adfc09fc68345
 - 工作分支：codex/v1.2-full-audit
 - CI 修复提交：55e4090 fix(ci): restore reproducible quality gates
-- Agent/管理系统实现提交：67beaed
+- Agent/管理系统实现提交：37fb3b8（含前序 94d8dd9、67beaed）
 - 环境：Windows、Python 3.x、Node 24、pnpm 11.22.0；时间：2026-09-07（Asia/Shanghai）
 
 ## 已修复
@@ -31,6 +31,7 @@
 | P1-CI002 | P1 | Frontend CI | pnpm cache 在启用 pnpm 前执行 | 固定 Node/pnpm，先 action-setup 再 setup-node cache | workspace test/typecheck/build | FIXED |
 | P1-S001 | P1 | Secrets | 生产可能使用默认值 | production runtime 对 persistence、provider、secret 长度/默认前缀 fail closed | settings tests | FIXED |
 | P1-T001 | P1 | Prompt injection | 缺少自然语言注入覆盖 | fake orchestrator 拒绝权限声明、改 actor、直连 DB 等注入 | natural-language injection test | FIXED |
+| P1-T002 | P1 | Tool injection | 业务文本可能被当作指令 | 扫描指令区并将《书名》作为 DATA；含注入样本文本的书名查询回归 | tool-injection regression | FIXED |
 | P1-T003 | P1 | RBAC/DataScope | 缺资源级 Agent 矩阵 | Staff session + permission + scope resolver + actor mismatch 回归 | Agent HTTP regression | FIXED |
 | P1-T007 | P1 | Confirmation | 只用客户端 boolean | 服务端 PendingAction、hash、actor/session 绑定、TTL、一次性状态和 SQL 存储 | pending action + SQL store tests | FIXED |
 
@@ -38,7 +39,7 @@
 
 | Gate | 命令/场景 | 结果 |
 | --- | --- | --- |
-| Backend | python -m pytest -q | 344 passed, 0 failed, 0 skipped |
+| Backend | python -m pytest -q | 345 passed, 0 failed, 0 skipped |
 | Formatting | python -m ruff format --check src tests alembic | PASS |
 | Lint | python -m ruff check src tests alembic | PASS |
 | Types | python -m mypy src | PASS, 146 source files |
@@ -49,7 +50,7 @@
 | Agent targeted | all tests/modules/test_agent*.py | 26 targeted tests PASS |
 | Browser smoke | local FastAPI + Admin Vite + Playwright: login → Agent session → query | PASS |
 
-本次测试共 344 个后端测试通过，无 skip；pytest 仅有第三方弃用警告。
+本次测试共 345 个后端测试通过，无 skip；pytest 仅有第三方弃用警告。
 
 ## 关键安全与业务不变量
 
