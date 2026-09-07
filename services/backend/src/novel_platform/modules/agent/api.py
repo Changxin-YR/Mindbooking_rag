@@ -270,6 +270,7 @@ def _orchestrate_local(
     from novel_platform.modules.agent.application import ConfirmationRequired, PermissionDenied
 
     lowered = message.casefold()
+    instruction_text = re.sub(r"《[^》]*》", "", lowered)
     injection_markers = (
         "ignore previous",
         "忽略以前",
@@ -281,7 +282,7 @@ def _orchestrate_local(
         "系统 prompt",
         "隐藏管理员",
     )
-    if any(marker in lowered for marker in injection_markers):
+    if any(marker in instruction_text for marker in injection_markers):
         gateway.audit_denied_instruction(
             agent_id=f"agt_{session['id']}",
             actor_id=claims.account_id,
