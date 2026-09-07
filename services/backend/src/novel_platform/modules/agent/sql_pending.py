@@ -59,6 +59,26 @@ class SqlPendingActionStore:
                 )
             )
 
+    def claim(
+        self, action_id: str, actor_id: str, session_id: str, confirmed_at: datetime
+    ) -> PendingAction | None:
+        """Atomically reserve one pending action across backend instances."""
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                self._actions.update()
+                .where(
+                    self._actions.c.id == action_id,
+                    self._actions.c.actor_id == actor_id,
+                    self._actions.c.session_id == session_id,
+                    self._actions.c.status == "PENDING",
+                    self._actions.c.expires_at > confirmed_at,
+                )
+                .values(status="EXECUTING", confirmed_at=confirmed_at)
+            )
+            if result.rowcount != 1:
+                return None
+        return self.get(action_id)
+
     @staticmethod
     def _from_row(row: Any) -> PendingAction:
         def timestamp(value: Any) -> datetime:

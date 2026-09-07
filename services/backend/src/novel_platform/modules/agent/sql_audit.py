@@ -28,6 +28,7 @@ class SqlAgentAuditSink:
             )
         )
         self._has_request_id = "request_id" in self._events.c
+        self._has_pending_action_id = "pending_action_id" in self._events.c
 
     def append(self, audit: AgentAudit) -> None:
         with self.engine.begin() as connection:
@@ -53,6 +54,8 @@ class SqlAgentAuditSink:
                 )
             if self._has_request_id:
                 values["request_id"] = audit.request_id
+            if self._has_pending_action_id:
+                values["pending_action_id"] = audit.pending_action_id
             connection.execute(self._events.insert().values(**values))
 
     def reload(self) -> tuple[AgentAudit, ...]:
@@ -123,6 +126,11 @@ class SqlAgentAuditSink:
             confirmed=bool(row.get("confirmed", False)),
             risk_level=str(row.get("risk_level", "LOW")),
             request_id=str(row["request_id"]) if row.get("request_id") is not None else None,
+            pending_action_id=(
+                str(row["pending_action_id"])
+                if row.get("pending_action_id") is not None
+                else None
+            ),
         )
 
 

@@ -22,6 +22,7 @@ class ErrorDetail(BaseModel):
     request_id: str | None = None
     trace_id: str | None = None
     action: ErrorAction | None = None
+    details: dict[str, Any] | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -35,6 +36,7 @@ def _response(
     code: str,
     message: str,
     action: dict[str, str] | None = None,
+    details: dict[str, Any] | None = None,
 ) -> JSONResponse:
     body = ErrorResponse(
         error=ErrorDetail(
@@ -43,6 +45,7 @@ def _response(
             request_id=current_request_id(),
             trace_id=current_trace_id(),
             action=ErrorAction(**action) if action else None,
+            details=details,
         )
     )
     return JSONResponse(status_code=status_code, content=body.model_dump(exclude_none=True))
@@ -55,11 +58,17 @@ async def http_exception_handler(_: Request, exc: Exception) -> JSONResponse:
         return _response(404, "RESOURCE_NOT_FOUND", "Resource not found")
     detail: Any = exc.detail
     if isinstance(detail, dict):
+        details = {
+            str(key): value
+            for key, value in detail.items()
+            if key not in {"code", "message", "action"}
+        }
         return _response(
             exc.status_code,
             detail.get("code", "HTTP_ERROR"),
             detail.get("message", "Request failed"),
             detail.get("action"),
+            details or None,
         )
     return _response(exc.status_code, "HTTP_ERROR", str(detail))
 

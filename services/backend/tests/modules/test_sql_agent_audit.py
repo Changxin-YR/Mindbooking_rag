@@ -27,6 +27,7 @@ def test_sql_agent_audit_sink_reloads_append_only_events() -> None:
         sa.Column("device_id", sa.String(128)),
         sa.Column("confirmed", sa.Boolean, nullable=False),
         sa.Column("risk_level", sa.String(16), nullable=False),
+        sa.Column("pending_action_id", sa.String(128)),
     )
     engine = create_engine("sqlite+pysqlite:///:memory:")
     metadata.create_all(engine)
@@ -45,6 +46,7 @@ def test_sql_agent_audit_sink_reloads_append_only_events() -> None:
         device_id="device-1",
         confirmed=True,
         risk_level="HIGH",
+        pending_action_id="ACT-1",
     )
 
     SqlAgentAuditSink(engine).append(audit)

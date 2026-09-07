@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -196,6 +196,9 @@ class AgentSessionResponse(BaseModel):
     id: str
     actor_id: str
     title: str | None = None
+    status: str = "ACTIVE"
+    model_provider: str = "unknown"
+    context_version: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -228,6 +231,7 @@ class AgentActionDecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     confirmation_token: str | None = Field(default=None, min_length=1, max_length=256)
+    session_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 def _agent_context(request: Request, claims: SessionClaims) -> Any:
@@ -300,7 +304,7 @@ def _orchestrate_local(
             result = gateway.confirm(
                 pending_id,
                 actor_id=claims.account_id,
-                session_id=claims.session_id,
+                session_id=session["id"],
                 request_id=current_request_id(),
             )
         except PermissionDenied:
@@ -318,7 +322,7 @@ def _orchestrate_local(
                 actor_id=claims.account_id,
                 tool_name=name,
                 arguments=arguments,
-                session_id=claims.session_id,
+                session_id=session["id"],
                 request_id=current_request_id(),
             ),
             context=context,
@@ -525,7 +529,7 @@ def build_agent_action_router(
             return gateway.confirm(
                 pending_action_id,
                 actor_id=claims.account_id,
-                session_id=claims.session_id,
+                session_id=payload.session_id or claims.session_id,
                 confirmation_token=payload.confirmation_token,
                 request_id=current_request_id(),
             )
@@ -558,10 +562,14 @@ def build_agent_runtime_router(
     *,
     auth_required: bool = False,
     authorize_staff: Callable[[SessionClaims, str], None] | None = None,
+    session_store: Any | None = None,
 ) -> APIRouter:
     """Expose text chat and the MCP transport used by the real Harness runtime."""
     router = APIRouter(prefix="/admin/api/v1/agent", tags=["agent-runtime"])
-    sessions: dict[str, dict[str, Any]] = {}
+    if session_store is None:
+        from novel_platform.modules.agent.application import InMemoryAgentSessionStore
+
+        session_store = InMemoryAgentSessionStore()
 
     def require_runtime_staff(request: Request) -> SessionClaims:
         claims = require_staff_session(request)
@@ -570,23 +578,20 @@ def build_agent_runtime_router(
         return claims
 
     def session_for(session_id: str, actor_id: str) -> dict[str, Any]:
-        session = sessions.get(session_id)
-        if session is None:
-            now = datetime.now(UTC)
-            session = {
-                "id": session_id,
-                "actor_id": actor_id,
-                "title": None,
-                "created_at": now,
-                "updated_at": now,
-                "messages": [],
-                "context": {},
-            }
-            sessions[session_id] = session
-        elif session["actor_id"] != actor_id:
+        from novel_platform.modules.agent.application import PermissionDenied
+
+        try:
+            session = session_store.get(session_id, actor_id)
+            if session is None:
+                session = session_store.create(
+                    session_id,
+                    actor_id,
+                    model_provider=str(getattr(runner, "provider", "unknown")),
+                )
+        except (PermissionError, PermissionDenied) as exc:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, detail="agent session belongs to another staff"
-            )
+            ) from exc
         return session
 
     def session_response(session: dict[str, Any]) -> AgentSessionResponse:
@@ -594,6 +599,9 @@ def build_agent_runtime_router(
             id=session["id"],
             actor_id=session["actor_id"],
             title=session["title"],
+            status=session.get("status", "ACTIVE"),
+            model_provider=session.get("model_provider", "unknown"),
+            context_version=int(session.get("context_version", 0)),
             created_at=session["created_at"],
             updated_at=session["updated_at"],
         )
@@ -601,17 +609,30 @@ def build_agent_runtime_router(
     def append_message(
         session: dict[str, Any], role: str, content: str, tool_name: str | None = None
     ) -> None:
-        session["messages"].append(
-            AgentMessageResponse(
-                id=f"MSG_{uuid4().hex}",
-                session_id=session["id"],
-                role=role,
-                content=content,
-                tool_name=tool_name,
-                created_at=datetime.now(UTC),
-            )
+        message = session_store.append_message(
+            session["id"], session["actor_id"], role, content, tool_name
         )
-        session["updated_at"] = datetime.now(UTC)
+        if not any(
+            str(getattr(item, "id", item.get("id", "") if isinstance(item, dict) else ""))
+            == message["id"]
+            for item in session["messages"]
+        ):
+            session["messages"].append(AgentMessageResponse.model_validate(message))
+        session["updated_at"] = message["created_at"]
+
+    def persist_session(session: dict[str, Any]) -> None:
+        try:
+            session_store.save(session)
+        except RuntimeError as exc:
+            if str(exc) == "AGENT_SESSION_VERSION_CONFLICT":
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "AGENT_SESSION_VERSION_CONFLICT",
+                        "message": "会话已在其他实例更新",
+                    },
+                ) from exc
+            raise
 
     @router.post("/sessions", response_model=AgentSessionResponse)
     def create_session(
@@ -622,16 +643,13 @@ def build_agent_runtime_router(
         session["title"] = (
             payload.title.strip() if payload.title and payload.title.strip() else None
         )
+        persist_session(session)
         return session_response(session)
 
     @router.get("/sessions", response_model=list[AgentSessionResponse])
     def list_sessions(request: Request) -> list[AgentSessionResponse]:
         claims = require_runtime_staff(request)
-        return [
-            session_response(item)
-            for item in sessions.values()
-            if item["actor_id"] == claims.account_id
-        ]
+        return [session_response(item) for item in session_store.list(claims.account_id)]
 
     @router.get("/sessions/{session_id}", response_model=AgentSessionResponse)
     def get_session(session_id: str, request: Request) -> AgentSessionResponse:
@@ -704,6 +722,7 @@ def build_agent_runtime_router(
             ) from exc
         response = str(getattr(result, "final_response", ""))
         append_message(session, "assistant", response, tool_name)
+        persist_session(session)
         return AgentChatResponse(
             session_id=session_id,
             response=response,

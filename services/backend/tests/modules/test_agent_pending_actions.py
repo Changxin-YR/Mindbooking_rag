@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -68,6 +69,52 @@ def test_pending_action_binds_args_actor_session_and_executes_once(tmp_path) -> 
         gateway.confirm(
             action.id, actor_id="staff-2", session_id="sess-1", confirmation_token=token
         )
+
+
+def test_pending_action_concurrent_confirmation_executes_business_callback_once() -> None:
+    calls: list[dict[str, object]] = []
+    gateway = AgentGateway(Permissions(), InMemoryAgentAuditLog())
+    gateway.register(
+        ToolResource(
+            name="review.decide",
+            description="Review",
+            permission="review.decide",
+            read_only=False,
+            high_risk=True,
+        ),
+        lambda args: calls.append(args) or {"ok": True},
+    )
+    with pytest.raises(ConfirmationRequired) as raised:
+        gateway.execute(
+            AgentToolCall(
+                agent_id="agent-1",
+                actor_id="staff-1",
+                tool_name="review.decide",
+                arguments={"submission_id": "sub-2"},
+                session_id="sess-2",
+            ),
+            context=AgentExecutionContext(
+                actor_id="staff-1", session_id="sess-2", request_id="req-2"
+            ),
+        )
+    action = raised.value.pending_action
+    assert action is not None
+    token = f"{action.id}:{action.arguments_hash}"
+
+    def confirm() -> str:
+        try:
+            gateway.confirm(
+                action.id, actor_id="staff-1", session_id="sess-2", confirmation_token=token
+            )
+        except ConfirmationRequired:
+            return "conflict"
+        return "success"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _item: confirm(), range(2)))
+
+    assert sorted(outcomes) == ["conflict", "success"]
+    assert calls == [{"submission_id": "sub-2"}]
 
 
 def test_gateway_rejects_context_actor_spoof() -> None:
@@ -143,3 +190,77 @@ def test_sql_pending_action_store_round_trips_and_updates(tmp_path) -> None:
     loaded.executed_at = datetime.now(UTC)
     store.update(loaded)
     assert store.get(action.id).status == "EXECUTED"
+
+
+def test_sql_pending_action_is_claimed_once_across_gateway_instances(tmp_path) -> None:
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'agent-claim.db'}")
+    metadata = sa.MetaData()
+    sa.Table(
+        "agent_pending_actions",
+        metadata,
+        sa.Column("id", sa.String(128), primary_key=True),
+        sa.Column("actor_id", sa.String(64), nullable=False),
+        sa.Column("session_id", sa.String(128), nullable=False),
+        sa.Column("tool_name", sa.String(128), nullable=False),
+        sa.Column("arguments_hash", sa.String(64), nullable=False),
+        sa.Column("arguments_snapshot", sa.Text, nullable=False),
+        sa.Column("risk_level", sa.String(16), nullable=False),
+        sa.Column("impact_summary", sa.String(255), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False),
+        sa.Column("confirmed_at", sa.DateTime(timezone=True)),
+        sa.Column("executed_at", sa.DateTime(timezone=True)),
+    )
+    metadata.create_all(engine)
+    calls: list[dict[str, object]] = []
+
+    def gateway() -> AgentGateway:
+        result = AgentGateway(
+            Permissions(), InMemoryAgentAuditLog(), pending_store=SqlPendingActionStore(engine)
+        )
+        result.register(
+            ToolResource(
+                name="review.decide",
+                description="Review",
+                permission="review.decide",
+                read_only=False,
+                high_risk=True,
+            ),
+            lambda args: calls.append(args) or {"ok": True},
+        )
+        return result
+
+    first = gateway()
+    second = gateway()
+    with pytest.raises(ConfirmationRequired) as raised:
+        first.execute(
+            AgentToolCall(
+                agent_id="agent-1",
+                actor_id="staff-1",
+                tool_name="review.decide",
+                arguments={"submission_id": "sub-sql"},
+                session_id="session-sql",
+            )
+        )
+    action = raised.value.pending_action
+    assert action is not None
+    token = f"{action.id}:{action.arguments_hash}"
+
+    def confirm(instance: AgentGateway) -> str:
+        try:
+            instance.confirm(
+                action.id,
+                actor_id="staff-1",
+                session_id="session-sql",
+                confirmation_token=token,
+            )
+        except ConfirmationRequired:
+            return "conflict"
+        return "success"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(confirm, (first, second)))
+
+    assert sorted(outcomes) == ["conflict", "success"]
+    assert calls == [{"submission_id": "sub-sql"}]

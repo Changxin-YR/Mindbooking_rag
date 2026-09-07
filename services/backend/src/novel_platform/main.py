@@ -28,6 +28,7 @@ from novel_platform.modules.admin_center.sql_service import SqlAdminCenterServic
 from novel_platform.modules.agent import (
     AgentGateway,
     InMemoryAgentAuditLog,
+    SqlAgentSessionStore,
     SqlPendingActionStore,
     ToolResource,
     build_agent_action_router,
@@ -83,7 +84,7 @@ from novel_platform.modules.library.api import build_library_router
 from novel_platform.modules.library.application import LibraryService
 from novel_platform.modules.library.sql_service import SqlLibraryService
 from novel_platform.modules.membership.api import build_membership_router
-from novel_platform.modules.membership.domain import ChapterPolicy, MembershipService
+from novel_platform.modules.membership.domain import AccessMode, ChapterPolicy, MembershipService
 from novel_platform.modules.membership.sql_service import SqlMembershipService
 from novel_platform.modules.notification.api import build_notification_router
 from novel_platform.modules.notification.application import NotificationService
@@ -126,6 +127,7 @@ from novel_platform.modules.search import (
     SearchService,
 )
 from novel_platform.modules.search.api import build_search_router
+from novel_platform.modules.search.domain import SearchQuery
 from novel_platform.modules.support.api import build_support_router
 from novel_platform.modules.support.application import SupportService
 from novel_platform.modules.support.sql_service import SqlSupportService
@@ -275,10 +277,16 @@ def create_app() -> FastAPI:
         else fallback_search,
         fallback=fallback_search if settings.opensearch_url else None,
     )
+    if settings.opensearch_url:
+        # Warm the projection before the first public read pays the refresh cost.
+        search.search(SearchQuery(page_size=1))
     agent_audit_sink = SqlAgentAuditSink(engine) if engine is not None else InMemoryAgentAuditLog()
     app.state.agent_audit_sink = agent_audit_sink
     pending_store = (
         SqlPendingActionStore(engine) if engine is not None and hasattr(engine, "connect") else None
+    )
+    session_store = (
+        SqlAgentSessionStore(engine) if engine is not None and hasattr(engine, "connect") else None
     )
     agent_gateway = AgentGateway(
         platform,
@@ -567,6 +575,11 @@ def create_app() -> FastAPI:
             description="Record an assigned review decision through ReviewService",
             permission="review.decide",
             read_only=False,
+            high_risk=True,
+            requires_confirmation=True,
+            risk_level="HIGH",
+            confirmation_policy="EXPLICIT",
+            idempotency_policy="RESOURCE_STATE",
             input_schema={
                 "type": "object",
                 "additionalProperties": False,
@@ -609,6 +622,373 @@ def create_app() -> FastAPI:
     app.state.governance_service = governance
     commerce.record_payment_credit_failure = governance.record_payment_credit_failure
     governance.repair_payment_credit = commerce.repair_payment_credit
+
+    def agent_global_scope(arguments: dict[str, Any], context: Any) -> bool:
+        del arguments
+        return bool(
+            context is not None
+            and any(
+                scope_type.upper() in {"ALL", "GLOBAL"} and scope_value == "*"
+                for scope_type, scope_value in context.data_scopes
+            )
+        )
+
+    def agent_account_scope(arguments: dict[str, Any], context: Any, permission: str) -> bool:
+        account_id = arguments.get("account_id")
+        return bool(
+            isinstance(account_id, str)
+            and context is not None
+            and platform.can_access(context.actor_id, permission, "ACCOUNT", account_id)
+        )
+
+    def lookup_user360(arguments: dict[str, Any], context: Any) -> dict[str, object]:
+        from novel_platform.modules.agent.application import PermissionDenied
+
+        account_id = arguments.get("account_id")
+        if not isinstance(account_id, str) or context is None:
+            raise ValueError("account_id is required")
+        if not platform.can_access(context.actor_id, "admin.access", "ACCOUNT", account_id):
+            raise PermissionDenied("user is outside the staff data scope")
+        profile = identity.profile_for_account(account_id)
+        phone = identity.phone_for_account(account_id) or ""
+        sensitive = "admin.user360.sensitive" in context.permissions
+        return {
+            "account_id": profile.id,
+            "account_no": profile.account_no,
+            "nickname": profile.nickname,
+            "phone": phone if sensitive else (f"{phone[:3]}****{phone[-4:]}" if phone else None),
+            "real_name": "已实名" if identity.is_real_named(account_id) else "未实名",
+            "sensitive_fields": ("phone",) if sensitive else (),
+        }
+
+    agent_gateway.register(
+        ToolResource(
+            name="user360.lookup",
+            description="Read a masked User360 account projection; sensitive fields require step-up permission",
+            permission="admin.access",
+            input_schema={
+                "type": "object",
+                "required": ["account_id"],
+                "properties": {"account_id": {"type": "string", "minLength": 1}},
+                "additionalProperties": False,
+            },
+            scope_resolver=lambda arguments, context: agent_account_scope(
+                arguments, context, "admin.access"
+            ),
+        ),
+        lookup_user360,
+    )
+
+    def risk_signal_scope(arguments: dict[str, Any], context: Any) -> bool:
+        signal_id = arguments.get("signal_id")
+        if not isinstance(signal_id, str) or context is None:
+            return False
+        try:
+            signal = risk.get_signal(signal_id)
+        except KeyError:
+            return False
+        return platform.can_access(context.actor_id, "risk.read", "ACCOUNT", signal.account_id)
+
+    def get_risk_signal(arguments: dict[str, Any]) -> dict[str, object]:
+        return asdict(risk.get_signal(str(arguments["signal_id"])))
+
+    agent_gateway.register(
+        ToolResource(
+            name="risk.get_signal",
+            description="Read a risk signal inside the Staff account scope",
+            permission="risk.read",
+            input_schema={
+                "type": "object",
+                "required": ["signal_id"],
+                "properties": {"signal_id": {"type": "string", "minLength": 1}},
+                "additionalProperties": False,
+            },
+            scope_resolver=risk_signal_scope,
+        ),
+        get_risk_signal,
+    )
+
+    def freeze_risk_signal(arguments: dict[str, Any], context: Any) -> dict[str, object]:
+        from novel_platform.modules.agent.application import PermissionDenied
+
+        if context is None or not risk_signal_scope(arguments, context):
+            raise PermissionDenied("risk signal is outside the staff data scope")
+        return asdict(risk.freeze(str(arguments["signal_id"])))
+
+    agent_gateway.register(
+        ToolResource(
+            name="risk.freeze",
+            description="Freeze a scoped risk signal after explicit Staff confirmation",
+            permission="risk.write",
+            read_only=False,
+            high_risk=True,
+            requires_confirmation=True,
+            risk_level="CRITICAL",
+            confirmation_policy="EXPLICIT",
+            idempotency_policy="RESOURCE_STATE",
+            input_schema={
+                "type": "object",
+                "required": ["signal_id"],
+                "properties": {"signal_id": {"type": "string", "minLength": 1}},
+                "additionalProperties": False,
+            },
+            scope_resolver=risk_signal_scope,
+            result_validator=lambda data, _arguments, _context: (
+                isinstance(data, dict) and data.get("status") == "FROZEN"
+            ),
+        ),
+        freeze_risk_signal,
+    )
+
+    agent_gateway.register(
+        ToolResource(
+            name="governance.reconciliation.pending",
+            description="List payment credit repair facts for Finance/Governance staff",
+            permission="finance.read",
+            input_schema={"type": "object", "additionalProperties": False},
+            scope_resolver=agent_global_scope,
+        ),
+        lambda _arguments: [asdict(item) for item in governance.list_payment_credit_pending()],
+    )
+    agent_gateway.register(
+        ToolResource(
+            name="governance.reconciliation.list",
+            description="List reconciliation batches through GovernanceService",
+            permission="finance.read",
+            input_schema={"type": "object", "additionalProperties": False},
+            scope_resolver=agent_global_scope,
+        ),
+        lambda _arguments: [asdict(item) for item in governance.list_reconciliation_batches()],
+    )
+
+    def draft_parameter(arguments: dict[str, Any], context: Any) -> dict[str, object]:
+        from novel_platform.modules.agent.application import PermissionDenied
+
+        if context is None or not platform.can_access(
+            context.actor_id, "governance.write", "ALL", "*"
+        ):
+            raise PermissionDenied("governance scope denied")
+        return asdict(
+            governance.draft_parameter(
+                str(arguments["key"]), str(arguments["value"]), context.actor_id
+            )
+        )
+
+    agent_gateway.register(
+        ToolResource(
+            name="governance.parameter.draft",
+            description="Create a governance parameter draft as Maker; Checker approval remains separate",
+            permission="governance.write",
+            read_only=False,
+            requires_confirmation=True,
+            risk_level="HIGH",
+            confirmation_policy="EXPLICIT",
+            idempotency_policy="CLIENT_KEY",
+            input_schema={
+                "type": "object",
+                "required": ["key", "value"],
+                "properties": {
+                    "key": {"type": "string", "minLength": 1},
+                    "value": {"type": "string", "minLength": 1},
+                },
+                "additionalProperties": False,
+            },
+            scope_resolver=agent_global_scope,
+            result_validator=lambda data, _arguments, _context: (
+                isinstance(data, dict) and data.get("status") == "DRAFT"
+            ),
+        ),
+        draft_parameter,
+    )
+
+    def approve_parameter(arguments: dict[str, Any], context: Any) -> dict[str, object]:
+        from novel_platform.modules.agent.application import PermissionDenied
+
+        if context is None or not platform.can_access(
+            context.actor_id, "governance.write", "ALL", "*"
+        ):
+            raise PermissionDenied("governance scope denied")
+        return asdict(
+            governance.approve_parameter(str(arguments["parameter_id"]), context.actor_id)
+        )
+
+    agent_gateway.register(
+        ToolResource(
+            name="governance.parameter.approve",
+            description="Approve a parameter draft as a distinct Checker staff member",
+            permission="governance.write",
+            read_only=False,
+            requires_confirmation=True,
+            risk_level="CRITICAL",
+            confirmation_policy="EXPLICIT",
+            idempotency_policy="RESOURCE_STATE",
+            input_schema={
+                "type": "object",
+                "required": ["parameter_id"],
+                "properties": {"parameter_id": {"type": "string", "minLength": 1}},
+                "additionalProperties": False,
+            },
+            scope_resolver=agent_global_scope,
+            result_validator=lambda data, _arguments, _context: (
+                isinstance(data, dict)
+                and data.get("status") == "APPROVED"
+                and data.get("checker_id") == getattr(_context, "actor_id", None)
+            ),
+        ),
+        approve_parameter,
+    )
+
+    agent_gateway.register(
+        ToolResource(
+            name="approval.get",
+            description="Read a maker/checker approval request without changing it",
+            permission="approval.write",
+            input_schema={
+                "type": "object",
+                "required": ["approval_id"],
+                "properties": {"approval_id": {"type": "string", "minLength": 1}},
+                "additionalProperties": False,
+            },
+            scope_resolver=agent_global_scope,
+        ),
+        lambda arguments: asdict(approvals.get(str(arguments["approval_id"]))),
+    )
+
+    def membership_account_scope(arguments: dict[str, Any], context: Any) -> bool:
+        account_id = arguments.get("account_id")
+        return bool(
+            isinstance(account_id, str)
+            and context is not None
+            and platform.can_access(context.actor_id, "governance.read", "ACCOUNT", account_id)
+        )
+
+    agent_gateway.register(
+        ToolResource(
+            name="membership.status",
+            description="Read membership status for an account inside Staff scope",
+            permission="governance.read",
+            input_schema={
+                "type": "object",
+                "required": ["account_id"],
+                "properties": {"account_id": {"type": "string", "minLength": 1}},
+                "additionalProperties": False,
+            },
+            scope_resolver=membership_account_scope,
+        ),
+        lambda arguments: {
+            "account_id": str(arguments["account_id"]),
+            "active": bool(membership.is_active(str(arguments["account_id"]))),
+        },
+    )
+
+    def create_membership_plan(arguments: dict[str, Any], _context: Any) -> dict[str, object]:
+        create_plan = getattr(membership, "create_plan", None)
+        if not callable(create_plan):
+            raise TypeError("MEMBERSHIP_PLAN_PROVIDER_UNAVAILABLE")
+        return asdict(
+            create_plan(
+                str(arguments["plan_code"]),
+                str(arguments["name"]),
+                int(arguments["duration_days"]),
+                price_cents=int(arguments["price_cents"]),
+                daily_recommend_tickets=int(arguments["daily_recommend_tickets"]),
+                monthly_chapter_tickets=int(arguments["monthly_chapter_tickets"]),
+                version=int(arguments.get("version", 1)),
+            )
+        )
+
+    agent_gateway.register(
+        ToolResource(
+            name="membership.plan.create",
+            description="Create a versioned membership plan through MembershipService",
+            permission="governance.write",
+            read_only=False,
+            requires_confirmation=True,
+            risk_level="HIGH",
+            confirmation_policy="EXPLICIT",
+            idempotency_policy="RESOURCE_VERSION",
+            input_schema={
+                "type": "object",
+                "required": [
+                    "plan_code",
+                    "name",
+                    "duration_days",
+                    "daily_recommend_tickets",
+                    "monthly_chapter_tickets",
+                    "price_cents",
+                ],
+                "properties": {
+                    "plan_code": {"type": "string", "minLength": 1},
+                    "name": {"type": "string", "minLength": 1},
+                    "duration_days": {"type": "integer", "minimum": 1},
+                    "daily_recommend_tickets": {"type": "integer", "minimum": 0},
+                    "monthly_chapter_tickets": {"type": "integer", "minimum": 0},
+                    "price_cents": {"type": "integer", "minimum": 1},
+                    "version": {"type": "integer", "minimum": 1, "default": 1},
+                },
+                "additionalProperties": False,
+            },
+            scope_resolver=agent_global_scope,
+            result_validator=lambda data, _arguments, _context: (
+                isinstance(data, dict) and data.get("status") == "ACTIVE"
+            ),
+        ),
+        create_membership_plan,
+    )
+
+    def chapter_policy_scope(arguments: dict[str, Any], context: Any) -> bool:
+        chapter_id = arguments.get("chapter_id")
+        if not isinstance(chapter_id, str) or context is None:
+            return False
+        try:
+            chapter = content.get_chapter(chapter_id)
+            book_id = content.get_volume(chapter.volume_id).book_id
+        except KeyError:
+            return False
+        return platform.can_access(context.actor_id, "commerce.write", "BOOK", book_id)
+
+    def configure_chapter_policy(arguments: dict[str, Any], _context: Any) -> dict[str, object]:
+        if configure_chapter_commercial_policy is None:
+            raise RuntimeError("COMMERCIAL_POLICY_PROVIDER_UNAVAILABLE")
+        chapter_id = str(arguments["chapter_id"])
+        configure_chapter_commercial_policy(
+            chapter_id, ChapterPolicy(int(arguments["price_coin"]), AccessMode.VIP_REQUIRED)
+        )
+        chapter = content.get_chapter(chapter_id)
+        return {
+            "id": chapter.id,
+            "commercial_policy": chapter.commercial_policy.value,
+            "price_coin": int(arguments["price_coin"]),
+        }
+
+    agent_gateway.register(
+        ToolResource(
+            name="membership.chapter_policy.update",
+            description="Configure a chapter commercial policy through Content and Commerce services",
+            permission="commerce.write",
+            read_only=False,
+            requires_confirmation=True,
+            risk_level="HIGH",
+            confirmation_policy="EXPLICIT",
+            idempotency_policy="RESOURCE_STATE",
+            input_schema={
+                "type": "object",
+                "required": ["chapter_id", "price_coin"],
+                "properties": {
+                    "chapter_id": {"type": "string", "minLength": 1},
+                    "price_coin": {"type": "integer", "minimum": 1},
+                },
+                "additionalProperties": False,
+            },
+            scope_resolver=chapter_policy_scope,
+            result_validator=lambda data, _arguments, _context: (
+                isinstance(data, dict)
+                and data.get("id") == _arguments.get("chapter_id")
+                and data.get("commercial_policy") == "VIP"
+            ),
+        ),
+        configure_chapter_policy,
+    )
 
     delivery_table = None
     if engine is not None and getattr(engine, "dialect", None) is not None:
@@ -728,6 +1108,7 @@ def create_app() -> FastAPI:
             app.state.agent_runner,
             auth_required=True,
             authorize_staff=staff_auth.authorize,
+            session_store=session_store,
         )
     )
     for router in build_content_routers(

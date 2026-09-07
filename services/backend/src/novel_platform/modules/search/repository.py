@@ -242,12 +242,20 @@ class OpenSearchSearchAdapter(SearchPort):
         self._index = index
         self._timeout = timeout
         self._index_ready = False
+        self._projection_lock = RLock()
+        self._projection_facts: tuple[BookSearchFact, ...] | None = None
 
     def search(self, query: SearchQuery) -> SearchResultPage:
-        facts = tuple(fact for fact in self._facts() if fact.is_public)
-        # ponytail: rebuild the small projection per request; replace with outbox-driven indexing at scale.
-        self._ensure_index()
-        self._replace_projection(facts)
+        facts = tuple(
+            sorted(
+                (fact for fact in self._facts() if fact.is_public), key=lambda item: item.book_id
+            )
+        )
+        with self._projection_lock:
+            self._ensure_index()
+            if self._projection_facts != facts:
+                self._replace_projection(facts)
+                self._projection_facts = facts
         filters: list[dict[str, object]] = []
         for field, value in (
             ("channel", query.channel),

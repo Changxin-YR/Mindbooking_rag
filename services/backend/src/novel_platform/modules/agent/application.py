@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -47,6 +48,31 @@ class PendingActionStore(Protocol):
     def save(self, action: PendingAction) -> None: ...
 
     def update(self, action: PendingAction) -> None: ...
+
+
+class AgentSessionStore(Protocol):
+    def create(
+        self,
+        session_id: str,
+        actor_id: str,
+        title: str | None = None,
+        model_provider: str = "unknown",
+    ) -> dict[str, Any]: ...
+
+    def get(self, session_id: str, actor_id: str) -> dict[str, Any] | None: ...
+
+    def list(self, actor_id: str) -> tuple[dict[str, Any], ...]: ...
+
+    def save(self, session: dict[str, Any]) -> None: ...
+
+    def append_message(
+        self,
+        session_id: str,
+        actor_id: str,
+        role: str,
+        content: str,
+        tool_name: str | None = None,
+    ) -> dict[str, Any]: ...
 
 
 class AgentExecutionContext:
@@ -156,6 +182,74 @@ class InMemoryAgentAuditLog:
         return records[start : start + page_size], len(records)
 
 
+class InMemoryAgentSessionStore:
+    def __init__(self) -> None:
+        self._sessions: dict[str, dict[str, Any]] = {}
+
+    def create(
+        self,
+        session_id: str,
+        actor_id: str,
+        title: str | None = None,
+        model_provider: str = "unknown",
+    ) -> dict[str, Any]:
+        existing = self._sessions.get(session_id)
+        if existing is not None:
+            if existing["actor_id"] != actor_id:
+                raise PermissionDenied("agent session belongs to another staff")
+            return existing
+        now = datetime.now(UTC)
+        session: dict[str, Any] = {
+            "id": session_id,
+            "actor_id": actor_id,
+            "title": title,
+            "status": "ACTIVE",
+            "model_provider": model_provider,
+            "context_version": 0,
+            "created_at": now,
+            "updated_at": now,
+            "messages": [],
+            "context": {},
+        }
+        self._sessions[session_id] = session
+        return session
+
+    def get(self, session_id: str, actor_id: str) -> dict[str, Any] | None:
+        session = self._sessions.get(session_id)
+        if session is not None and session["actor_id"] != actor_id:
+            raise PermissionDenied("agent session belongs to another staff")
+        return session
+
+    def list(self, actor_id: str) -> tuple[dict[str, Any], ...]:
+        return tuple(item for item in self._sessions.values() if item["actor_id"] == actor_id)
+
+    def save(self, _session: dict[str, Any]) -> None:
+        _session["context_version"] = int(_session.get("context_version", 0)) + 1
+
+    def append_message(
+        self,
+        session_id: str,
+        actor_id: str,
+        role: str,
+        content: str,
+        tool_name: str | None = None,
+    ) -> dict[str, Any]:
+        session = self.get(session_id, actor_id)
+        if session is None:
+            session = self.create(session_id, actor_id)
+        message = {
+            "id": f"MSG_{uuid4().hex}",
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            "tool_name": tool_name,
+            "created_at": datetime.now(UTC),
+        }
+        session["messages"].append(message)
+        session["updated_at"] = datetime.now(UTC)
+        return message
+
+
 class AgentGateway:
     def __init__(
         self,
@@ -172,6 +266,9 @@ class AgentGateway:
         self._tools: dict[str, tuple[ToolResource, AgentCallback]] = {}
         self._pending_store = pending_store
         self._pending: dict[str, PendingAction] = {}
+        # ponytail: one gateway lock prevents duplicate confirmation in-process;
+        # a SQL conditional claim is the upgrade path for cross-instance execution.
+        self._confirm_lock = threading.Lock()
 
     @property
     def permission_checker(self) -> AgentPermissionChecker:
@@ -265,6 +362,24 @@ class AgentGateway:
         confirmation_token: str | None = None,
         request_id: str | None = None,
     ) -> AgentToolResult:
+        with self._confirm_lock:
+            return self._confirm(
+                action_id,
+                actor_id=actor_id,
+                session_id=session_id,
+                confirmation_token=confirmation_token,
+                request_id=request_id,
+            )
+
+    def _confirm(
+        self,
+        action_id: str,
+        *,
+        actor_id: str,
+        session_id: str,
+        confirmation_token: str | None = None,
+        request_id: str | None = None,
+    ) -> AgentToolResult:
         action = self.pending(action_id)
         if action is None or action.actor_id != actor_id or action.session_id != session_id:
             raise PermissionDenied("pending action is not owned by this staff session")
@@ -333,6 +448,18 @@ class AgentGateway:
                     pending_action_id=action.id,
                 )
                 raise PermissionDenied("agent resource is outside the staff data scope")
+        claim = getattr(self._pending_store, "claim", None)
+        if callable(claim):
+            claimed = claim(action.id, actor_id, session_id, now)
+            if claimed is None:
+                raise ConfirmationRequired(
+                    "pending action is no longer executable", pending_action=self.pending(action.id)
+                )
+            action = claimed
+        else:
+            action.status = "EXECUTING"
+            action.confirmed_at = now
+            self._update_pending(action)
         try:
             data = self._invoke_write(resource, callback, call.arguments, context)
         except Exception:
@@ -348,7 +475,6 @@ class AgentGateway:
             )
             raise
         action.status = "EXECUTED"
-        action.confirmed_at = now
         action.executed_at = datetime.now(UTC)
         self._update_pending(action)
         self._audit(
@@ -539,8 +665,10 @@ __all__ = [
     "AgentExecutionContext",
     "AgentGateway",
     "AgentPermissionChecker",
+    "AgentSessionStore",
     "ConfirmationRequired",
     "InMemoryAgentAuditLog",
+    "InMemoryAgentSessionStore",
     "PendingActionStore",
     "PermissionDenied",
     "ToolNotFound",

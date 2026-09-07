@@ -1765,9 +1765,9 @@ UPDATE alembic_version SET version_num='0038_account_profile' WHERE alembic_vers
 -- Running upgrade 0038_account_profile -> 0039_reader_preferences
 
 CREATE TABLE reading_preferences (
-    account_id VARCHAR(36) NOT NULL,
-    preferences_json TEXT NOT NULL,
-    PRIMARY KEY (account_id),
+    account_id VARCHAR(36) NOT NULL, 
+    preferences_json TEXT NOT NULL, 
+    PRIMARY KEY (account_id), 
     FOREIGN KEY(account_id) REFERENCES platform_accounts (id)
 );
 
@@ -1776,19 +1776,19 @@ UPDATE alembic_version SET version_num='0039_reader_preferences' WHERE alembic_v
 -- Running upgrade 0039_reader_preferences -> 0040_agent_pending_actions
 
 CREATE TABLE agent_pending_actions (
-    id VARCHAR(128) NOT NULL,
-    actor_id VARCHAR(64) NOT NULL,
-    session_id VARCHAR(128) NOT NULL,
-    tool_name VARCHAR(128) NOT NULL,
-    arguments_hash VARCHAR(64) NOT NULL,
-    arguments_snapshot TEXT NOT NULL,
-    risk_level VARCHAR(16) NOT NULL,
-    impact_summary VARCHAR(255) NOT NULL,
-    created_at DATETIME NOT NULL,
-    expires_at DATETIME NOT NULL,
-    status VARCHAR(16) NOT NULL,
-    confirmed_at DATETIME,
-    executed_at DATETIME,
+    id VARCHAR(128) NOT NULL, 
+    actor_id VARCHAR(64) NOT NULL, 
+    session_id VARCHAR(128) NOT NULL, 
+    tool_name VARCHAR(128) NOT NULL, 
+    arguments_hash VARCHAR(64) NOT NULL, 
+    arguments_snapshot TEXT NOT NULL, 
+    risk_level VARCHAR(16) NOT NULL, 
+    impact_summary VARCHAR(255) NOT NULL, 
+    created_at DATETIME NOT NULL, 
+    expires_at DATETIME NOT NULL, 
+    status VARCHAR(16) NOT NULL, 
+    confirmed_at DATETIME, 
+    executed_at DATETIME, 
     PRIMARY KEY (id)
 );
 
@@ -1797,4 +1797,44 @@ CREATE INDEX ix_agent_pending_actions_actor_status ON agent_pending_actions (act
 CREATE INDEX ix_agent_pending_actions_expires ON agent_pending_actions (expires_at);
 
 UPDATE alembic_version SET version_num='0040_agent_pending_actions' WHERE alembic_version.version_num = '0039_reader_preferences';
+
+-- Running upgrade 0040_agent_pending_actions -> 0041_agent_sessions
+
+CREATE TABLE agent_sessions (
+    id VARCHAR(128) NOT NULL, 
+    actor_id VARCHAR(64) NOT NULL, 
+    title VARCHAR(255), 
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE', 
+    model_provider VARCHAR(128) NOT NULL DEFAULT 'unknown', 
+    context_version INTEGER NOT NULL DEFAULT '0', 
+    context_json TEXT NOT NULL, 
+    created_at DATETIME NOT NULL, 
+    updated_at DATETIME NOT NULL, 
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX ix_agent_sessions_actor_updated ON agent_sessions (actor_id, updated_at);
+
+CREATE TABLE agent_messages (
+    id VARCHAR(128) NOT NULL, 
+    session_id VARCHAR(128) NOT NULL, 
+    `role` VARCHAR(32) NOT NULL, 
+    content TEXT NOT NULL, 
+    tool_name VARCHAR(128), 
+    created_at DATETIME NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(session_id) REFERENCES agent_sessions (id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_agent_messages_session_created ON agent_messages (session_id, created_at);
+
+UPDATE alembic_version SET version_num='0041_agent_sessions' WHERE alembic_version.version_num = '0040_agent_pending_actions';
+
+-- Running upgrade 0041_agent_sessions -> 0042_agent_audit_pending_action
+
+ALTER TABLE agent_audit_events ADD COLUMN pending_action_id VARCHAR(128);
+
+CREATE INDEX ix_agent_audit_events_pending_action ON agent_audit_events (pending_action_id);
+
+UPDATE alembic_version SET version_num='0042_agent_audit_pending_action' WHERE alembic_version.version_num = '0041_agent_sessions';
 

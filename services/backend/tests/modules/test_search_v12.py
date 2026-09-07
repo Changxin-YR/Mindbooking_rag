@@ -214,6 +214,27 @@ def test_opensearch_adapter_refreshes_projection_and_maps_hits() -> None:
     ]
 
 
+def test_opensearch_adapter_does_not_rebuild_unchanged_projection() -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _OpenSearchHandler)
+    server.calls = []
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        fact = _facts().get("book-1")
+        assert fact is not None
+        adapter = OpenSearchSearchAdapter(lambda: (fact,), f"http://127.0.0.1:{server.server_port}")
+        adapter.search(SearchQuery(query="星河"))
+        adapter.search(SearchQuery(query="剑歌"))
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+    assert server.calls.count("/novel-books/_delete_by_query?refresh=true") == 1
+    assert server.calls.count("/_bulk?refresh=wait_for") == 1
+    assert server.calls.count("/novel-books/_search") == 2
+
+
 def test_search_api_exposes_explicit_response_and_safe_empty_result() -> None:
     app = FastAPI()
     app.include_router(build_search_router(SearchService(InMemorySearchAdapter(_facts()))))

@@ -57,14 +57,24 @@ def test_agent_review_decision_executes_for_assigned_staff(monkeypatch) -> None:
     headers = _staff_headers(client, "agent-reviewer", staff.id)
     submission_id = _pending_submission(client, staff.id)
 
-    result = _mcp_call(
+    pending = _mcp_call(
         client,
         headers,
         name="review.decide",
         arguments={"submission_id": submission_id, "decision": "APPROVE"},
     )
 
-    assert result["result"]
+    assert pending["error"]["code"] == -32004
+    action = pending["error"]["message"]["pending_action"]
+    confirmed = client.post(
+        f"/admin/api/v1/agent/actions/{action['id']}/confirm",
+        headers=headers,
+        json={
+            "confirmation_token": f"{action['id']}:{action['arguments_hash']}",
+            "session_id": action["session_id"],
+        },
+    )
+    assert confirmed.status_code == 200
     assert client.app.state.review_service.get_submission(submission_id).status.value == "APPROVED"
 
 
@@ -85,3 +95,36 @@ def test_agent_review_decision_rejects_unassigned_submission(monkeypatch) -> Non
 
     assert result["error"]["code"] == -32003
     assert client.app.state.review_service.get_submission(submission_id).status.value == "PENDING"
+
+
+def test_agent_http_write_exposes_pending_action_and_confirms(monkeypatch) -> None:
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    client = TestClient(create_app())
+    staff = client.app.state.platform.create_staff("agent-http-reviewer", "review")
+    headers = _staff_headers(client, "agent-http-reviewer", staff.id)
+    submission_id = _pending_submission(client, staff.id)
+
+    pending = client.post(
+        "/admin/api/v1/agent/tools/execute",
+        headers=headers,
+        json={
+            "agent_id": "agent",
+            "actor_id": staff.id,
+            "tool_name": "review.decide",
+            "arguments": {"submission_id": submission_id, "decision": "APPROVE"},
+        },
+    )
+
+    assert pending.status_code == 409
+    detail = pending.json()["error"]["details"]
+    action = detail["pending_action"]
+    confirmed = client.post(
+        f"/admin/api/v1/agent/actions/{action['id']}/confirm",
+        headers=headers,
+        json={
+            "confirmation_token": f"{action['id']}:{action['arguments_hash']}",
+            "session_id": action["session_id"],
+        },
+    )
+    assert confirmed.status_code == 200
+    assert client.app.state.review_service.get_submission(submission_id).status.value == "APPROVED"

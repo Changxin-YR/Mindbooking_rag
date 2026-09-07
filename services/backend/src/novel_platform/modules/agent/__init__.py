@@ -21,8 +21,10 @@ from novel_platform.modules.agent.application import (
     AgentExecutionContext,
     AgentGateway,
     AgentPermissionChecker,
+    AgentSessionStore,
     ConfirmationRequired,
     InMemoryAgentAuditLog,
+    InMemoryAgentSessionStore,
     PendingAction,
     PendingActionStore,
     PermissionDenied,
@@ -30,6 +32,7 @@ from novel_platform.modules.agent.application import (
     WriteToolRejected,
 )
 from novel_platform.modules.agent.sql_pending import SqlPendingActionStore
+from novel_platform.modules.agent.sql_session import SqlAgentSessionStore
 
 __all__ = [
     "AgentAudit",
@@ -44,14 +47,17 @@ __all__ = [
     "AgentGateway",
     "AgentHarnessUrlResponse",
     "AgentPermissionChecker",
+    "AgentSessionStore",
     "AgentToolCall",
     "AgentToolResult",
     "ConfirmationRequired",
     "InMemoryAgentAuditLog",
+    "InMemoryAgentSessionStore",
     "PendingAction",
     "PendingActionResponse",
     "PendingActionStore",
     "PermissionDenied",
+    "SqlAgentSessionStore",
     "SqlPendingActionStore",
     "ToolNotFound",
     "ToolResource",
