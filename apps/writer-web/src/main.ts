@@ -1,6 +1,7 @@
 import { createApp, defineComponent, h, onMounted, ref } from 'vue'
+import { createApiClient } from '@mindbooking/api-client'
 import { parseShellState, type ShellState } from './shell-state'
-import { buildRequestHeaders, clearSession, loadSession, resolveApiBaseUrl, saveSession, type WriterSession } from './session'
+import { clearSession, isHttpStatus, loadSession, resolveApiBaseUrl, saveSession, type WriterSession } from './session'
 import './styles.css'
 import './route.css'
 
@@ -12,220 +13,53 @@ type Volume = { id: string; book_id: string; number: number; title: string }
 type Chapter = { id: string; volume_id: string; number: number; title: string; commercial_policy: string }
 type DraftSnapshot = { id: string; chapter_id: string; revision: number; content: string; save_mode: string }
 type ChapterVersion = { id: string; chapter_id: string; version: number; content: string; word_count: number }
+type Settlement = { id: string; period: string; amount_cents: number; status: string; withdrawn_cents: number }
+type Withdrawal = { id: string; settlement_id: string; amount_cents: number; status: string }
 
-const apiBase = resolveApiBaseUrl(
-  (import.meta as ImportMeta & { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL || '',
-  'http://localhost:8000',
-)
+const apiBase = resolveApiBaseUrl((import.meta as ImportMeta & { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL || '', 'http://localhost:8000')
+async function request<T>(session: WriterSession, path: string, init?: RequestInit): Promise<T> { return createApiClient({ baseUrl: apiBase, token: session.token }).request<T>(path, init) }
+const item = (tag: string, className: string | string[], children: Parameters<typeof h>[2] = []) => h(tag, { class: className }, children)
 
-async function request<T>(session: WriterSession, path: string, init?: RequestInit): Promise<T> {
-  const headers = buildRequestHeaders(session.token, init?.headers)
-  if (init?.body) headers.set('Content-Type', 'application/json')
-  const response = await fetch(`${apiBase}${path}`, { ...init, headers })
-  if (!response.ok) throw new Error(`HTTP ${response.status}`)
-  return response.json() as Promise<T>
+const iconPaths: Record<string, string> = {
+  home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9 21v-7h6v7"/>', book: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 5.5v16"/>', edit: '<path d="m4 17.25-.7 3.45 3.45-.7L18.6 8.15a2.4 2.4 0 0 0-3.4-3.4z"/><path d="m13.8 6.2 3.4 3.4"/>', clock: '<circle cx="12" cy="12" r="8.7"/><path d="M12 7v5l3.2 2"/>', chart: '<path d="M5 20v-6M12 20V8M19 20V4M3 20h18"/>', wallet: '<path d="M4 6.5h14a2 2 0 0 1 2 2V19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/><path d="M3 8.5V6a2 2 0 0 1 2-2h11M16 13h4"/><circle cx="16" cy="13" r=".5" fill="currentColor"/>', cap: '<path d="m3 9 9-5 9 5-9 5z"/><path d="M6 11.2V16c2.8 2.6 9.2 2.6 12 0v-4.8M21 9v6"/>', gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.8 1.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.1h-2.5V20a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1-1.8-1.8.1-.1A1.7 1.7 0 0 0 8 15a1.7 1.7 0 0 0-1.6-1H6v-2.5h.4A1.7 1.7 0 0 0 8 10a1.7 1.7 0 0 0-.3-1.9l-.1-.1 1.8-1.8.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6v-.1h2.5V5a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1 1.8 1.8-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.1v2.5H21a1.7 1.7 0 0 0-1.6 1z"/>', logout: '<path d="M10 5H5v14h5M14 8l4 4-4 4M9 12h9"/>', bell: '<path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>', arrow: '<path d="M5 12h13M13 6l6 6-6 6"/>', file: '<path d="M6 3h8l4 4v14H6zM14 3v5h5M9 13h6M9 17h6"/>',
 }
+const icon = (name: string, className = '') => h('span', { class: ['ui-icon', className], innerHTML: `<svg viewBox="0 0 24 24" aria-hidden="true">${iconPaths[name] || iconPaths.file}</svg>` })
+const navItems = [['工作台', 'home'], ['我的作品', 'book'], ['章节编辑', 'file'], ['审核进度', 'clock'], ['数据中心', 'chart'], ['收益与结算', 'wallet']] as const
+const link = (label: string, active = false, iconName?: string) => h('a', { class: ['side-link', active && 'active'], href: `?view=${encodeURIComponent(label)}` }, [icon(iconName || navItems.find(([name]) => name === label)?.[1] || 'file'), h('span', {}, label)])
+const heroCopy: Record<string, { title: string; subtitle: string; kicker: string; button: string }> = { 工作台: { kicker: 'WRITER CENTER', title: '今天也写一点。', subtitle: '好的故事，始于每一次坚持。', button: '进入作品' }, 我的作品: { kicker: 'WRITER CENTER', title: '在这里，书写属于你的故事。', subtitle: '每一个灵感，都值得被认真对待。', button: '进入作品' }, 章节编辑: { kicker: 'CHAPTER EDITOR', title: '章节编辑', subtitle: '把每一个故事节点，写成值得被看见的光。', button: '继续写作' }, 审核进度: { kicker: 'WRITER CENTER', title: '审核进度', subtitle: '提交作品，见证你的创作一步步走向读者。', button: '进入作品' }, 数据中心: { kicker: 'WRITER CENTER', title: '数据，让热爱更有方向。', subtitle: '记录创作日常，见证每一次成长。', button: '查看数据' }, 收益与结算: { kicker: 'WRITER CENTER', title: '收益与结算', subtitle: '让创作持续产生价值。', button: '进入作品' }, 创作学院: { kicker: 'WRITER CENTER', title: '创作学院', subtitle: '系统学习创作方法，让好故事走得更远。', button: '开启学习之旅' }, 账号设置: { kicker: 'WRITER CENTER', title: '账号设置', subtitle: '完善个人信息，开启更专业的创作之旅。', button: '进入设置' } }
 
-const item = (tag: string, className: string, children: Parameters<typeof h>[2] = []) => h(tag, { class: className }, children)
-const link = (label: string, active = false) => h('a', { class: ['side-link', active && 'active'], href: `?view=${encodeURIComponent(label)}` }, label)
-
-function stateView(state: ShellState) {
-  const content = {
-    loading: ['state-spinner', '正在加载工作台', '作品、审核和收益信息即将出现。'],
-    empty: ['state-mark', '还没有作品', '创建第一本作品，开始你的连载。'],
-    error: ['state-mark', '工作台暂时不可用', '请稍后重试，草稿内容不会受影响。'],
-    unauthorized: ['state-mark', '需要作者权限', '请登录作者账号后继续使用 Writer Center。'],
-    ready: ['', '', ''],
-  }[state]
-  return item('main', 'writer-state', [item('div', 'state-box', [item('div', content[0], content[0] === 'state-spinner' ? '' : '!'), item('h1', '', content[1]), item('p', '', content[2]), h('a', { class: 'state-action', href: '?state=ready' }, state === 'error' ? '重新加载' : '回到工作台')])])
-}
-
-function sessionView(token: string, accountId: string, error: string, onSubmit: (event: Event) => void, onToken: (event: Event) => void, onAccountId: (event: Event) => void) {
-  return item('main', 'writer-state', [h('form', { class: 'state-box session-box', onSubmit }, [
-    item('div', 'state-mark', '墨'),
-    item('h1', '', '进入 Writer Center'),
-    item('p', '', '请输入登录接口返回的会话信息。'),
-    h('label', {}, ['Access token', h('input', { value: token, type: 'password', autocomplete: 'off', required: true, onInput: onToken })]),
-    h('label', {}, ['Account ID', h('input', { value: accountId, autocomplete: 'username', required: true, onInput: onAccountId })]),
-    error && item('p', 'session-error', error),
-    h('button', { class: 'state-action', type: 'submit' }, '保存并进入'),
-  ])])
-}
+function stateView(state: ShellState) { const content = { loading: ['state-spinner', '正在加载工作台', '作品、审核和收益信息即将出现。'], empty: ['state-mark', '还没有作品', '创建第一本作品，开始你的连载。'], error: ['state-mark', '工作台暂时不可用', '请稍后重试，草稿内容不会受影响。'], unauthorized: ['state-mark', '需要作者权限', '请登录作者账号后继续使用 Writer Center。'], ready: ['', '', ''] }[state]; return item('main', 'writer-state', [item('div', 'state-box', [item('div', content[0], content[0] === 'state-spinner' ? '' : '!'), h('h1', {}, content[1]), h('p', {}, content[2]), h('a', { class: 'state-action', href: '?state=ready' }, state === 'error' ? '重新加载' : '回到工作台')])]) }
+function sessionView(phone: string, password: string, error: string, onSubmit: (event: Event) => void, onPhone: (event: Event) => void, onPassword: (event: Event) => void) { return item('main', 'writer-state', [h('form', { class: 'state-box session-box', onSubmit }, [item('div', 'state-mark', '墨'), h('h1', {}, '进入 Writer Center'), h('p', {}, '使用统一账号登录，作者身份由服务端会话解析。'), h('label', {}, ['手机号', h('input', { value: phone, type: 'tel', autocomplete: 'username', required: true, onInput: onPhone })]), h('label', {}, ['密码', h('input', { value: password, type: 'password', autocomplete: 'current-password', required: true, onInput: onPassword })]), error && item('p', 'session-error', error), h('button', { class: 'state-action', type: 'submit' }, '保存并进入')])]) }
 
 const Workspace = defineComponent({
   setup() {
-    const state = ref(parseShellState(new URLSearchParams(window.location.search).get('state')))
-    const session = ref<WriterSession | null>(loadSession())
-    const authorId = ref('')
-    const view = ref(new URLSearchParams(window.location.search).get('view') || '工作台')
-    const stats = ref<WritingStat[]>([])
-    const books = ref<Book[]>([])
-    const reviews = ref<Review[]>([])
-    const title = ref('')
-    const reviewBookId = ref('')
-    const reviewVersions = ref('')
-    const editorBookId = ref(localStorage.getItem('writer-last-book-id') || '')
-    const volumeTitle = ref('')
-    const volumeNumber = ref('1')
-    const volumeId = ref('')
-    const chapterTitle = ref('')
-    const chapterNumber = ref('1')
-    const chapterPolicy = ref('FREE')
-    const chapterId = ref('')
-    const draftId = ref('')
-    const draftRevision = ref(0)
-    const editorContent = ref('')
-    const editorMessage = ref('')
-    const message = ref('')
-    const sessionToken = ref(session.value?.token || '')
-    const sessionAccountId = ref(session.value?.accountId || '')
-    const sessionError = ref('')
-
-    function updateSession(event: Event) {
-      event.preventDefault()
-      try {
-        session.value = saveSession({ token: sessionToken.value, accountId: sessionAccountId.value })
-        sessionError.value = ''
-        void load()
-      } catch {
-        sessionError.value = '请输入有效的 Access token 和 Account ID。'
-      }
-    }
-
-    function signOut(event: Event) {
-      event.preventDefault()
-      clearSession()
-      session.value = null
-      sessionToken.value = ''
-      sessionAccountId.value = ''
-    }
-
-    async function load() {
-      if (!session.value) return
-      try {
-        const profile = await request<AuthorProfile>(session.value, '/writer/api/v1/author/profile')
-        authorId.value = profile.id
-        if (view.value === '数据中心') stats.value = await request<WritingStat[]>(session.value, `/writer/api/v1/authors/${authorId.value}/calendar`)
-        if (view.value === '审核进度') reviews.value = await request<Review[]>(session.value, '/admin/api/v1/reviews')
-      } catch (error) {
-        if (error instanceof Error && error.message === 'HTTP 401') session.value = null
-        message.value = '数据暂时不可用，请重新登录或稍后重试。'
-      }
-    }
-
-    async function createBook(event: Event) {
-      event.preventDefault()
-      if (!title.value.trim() || !session.value || !authorId.value) {
-        message.value = '未找到当前账号的作者资料，请先完成作者申请。'
-        return
-      }
-      try {
-        const book = await request<Book>(session.value, '/writer/api/v1/books', { method: 'POST', body: JSON.stringify({ author_id: authorId.value, title: title.value }) })
-        books.value.unshift(book)
-        localStorage.setItem('writer-last-book-id', book.id)
-        editorBookId.value = book.id
-        title.value = ''
-        message.value = '作品已创建，可以继续添加卷和章节。'
-      } catch (error) {
-        if (error instanceof Error && error.message === 'HTTP 401') session.value = null
-        message.value = '作品创建失败，请稍后重试。'
-      }
-    }
-
-    async function createVolume(event: Event) {
-      event.preventDefault()
-      if (!session.value || !editorBookId.value.trim() || !volumeTitle.value.trim()) {
-        editorMessage.value = '请先填写作品 ID 和卷标题。'
-        return
-      }
-      try {
-        const volume = await request<Volume>(session.value, `/writer/api/v1/books/${encodeURIComponent(editorBookId.value.trim())}/volumes`, { method: 'POST', body: JSON.stringify({ title: volumeTitle.value.trim(), number: Number(volumeNumber.value) }) })
-        volumeId.value = volume.id
-        editorMessage.value = '卷已创建，可以继续创建章节。'
-      } catch {
-        editorMessage.value = '卷创建失败，请确认作品属于当前作者且序号未重复。'
-      }
-    }
-
-    async function createChapter(event: Event) {
-      event.preventDefault()
-      if (!session.value || !volumeId.value.trim() || !chapterTitle.value.trim()) {
-        editorMessage.value = '请先填写卷 ID 和章节标题。'
-        return
-      }
-      try {
-        const chapter = await request<Chapter>(session.value, `/writer/api/v1/volumes/${encodeURIComponent(volumeId.value.trim())}/chapters`, { method: 'POST', body: JSON.stringify({ title: chapterTitle.value.trim(), number: Number(chapterNumber.value), commercial_policy: chapterPolicy.value }) })
-        chapterId.value = chapter.id
-        editorMessage.value = '章节已创建，可以开始写作。'
-      } catch {
-        editorMessage.value = '章节创建失败，请确认卷属于当前作者且序号未重复。'
-      }
-    }
-
-    async function saveDraft(event: Event) {
-      event.preventDefault()
-      if (!session.value || !chapterId.value.trim()) {
-        editorMessage.value = '请先创建章节。'
-        return
-      }
-      try {
-        const draft = await request<DraftSnapshot>(session.value, `/writer/api/v1/chapters/${encodeURIComponent(chapterId.value.trim())}/drafts`, { method: 'POST', body: JSON.stringify({ content: editorContent.value, save_mode: 'MANUAL', ...(draftRevision.value ? { expected_revision: draftRevision.value } : {}) }) })
-        draftId.value = draft.id
-        draftRevision.value = draft.revision
-        editorMessage.value = '草稿已保存。'
-      } catch {
-        editorMessage.value = '草稿保存失败，可能是版本已更新，请重新加载后再试。'
-      }
-    }
-
-    async function createVersion(event: Event) {
-      event.preventDefault()
-      if (!session.value || !chapterId.value.trim() || !draftId.value.trim()) {
-        editorMessage.value = '请先保存草稿。'
-        return
-      }
-      try {
-        const version = await request<ChapterVersion>(session.value, `/writer/api/v1/chapters/${encodeURIComponent(chapterId.value.trim())}/versions`, { method: 'POST', body: JSON.stringify({ snapshot_id: draftId.value }) })
-        editorMessage.value = `固定版本已生成 v${version.version}，可提交首发审核。`
-      } catch {
-        editorMessage.value = '固定版本生成失败，请先保存有效草稿。'
-      }
-    }
-
-    async function submitFirstListing(event: Event) {
-      event.preventDefault()
-      if (!session.value || !reviewBookId.value.trim()) return
-      const fixedVersionIds = reviewVersions.value.split(',').map((value) => value.trim()).filter(Boolean)
-      if (!fixedVersionIds.length) {
-        message.value = '请填写至少一个固定版本 ID。'
-        return
-      }
-      try {
-        const review = await request<Review>(session.value, `/writer/api/v1/books/${encodeURIComponent(reviewBookId.value.trim())}/first-listing-submissions`, { method: 'POST', body: JSON.stringify({ fixed_version_ids: fixedVersionIds }) })
-        reviews.value.unshift(review)
-        reviewVersions.value = ''
-        message.value = '首发审核已提交，等待人工审核。'
-      } catch {
-        message.value = '首发审核提交失败，请确认作品和固定版本属于当前作者。'
-      }
-    }
-
+    const state = ref(parseShellState(new URLSearchParams(window.location.search).get('state'))); const session = ref<WriterSession | null>(loadSession()); const authorId = ref(''); const view = ref(new URLSearchParams(window.location.search).get('view') || '工作台')
+    const stats = ref<WritingStat[]>([]); const books = ref<Book[]>([]); const settlements = ref<Settlement[]>([]); const reviews = ref<Review[]>([]); const title = ref(''); const reviewBookId = ref(''); const reviewVersions = ref(''); const editorBookId = ref(''); const volumeTitle = ref(''); const volumeNumber = ref('1'); const volumeId = ref(''); const chapterTitle = ref(''); const chapterNumber = ref('1'); const chapterPolicy = ref('FREE'); const chapterId = ref(''); const draftId = ref(''); const draftRevision = ref(0); const editorContent = ref(''); const editorMessage = ref(''); const message = ref(''); const sessionPhone = ref(''); const sessionPassword = ref(''); const sessionError = ref(''); const penName = ref(''); const penNameNotice = ref(''); const settlementId = ref(''); const withdrawalAmount = ref(''); const payoutMethod = ref('ALIPAY'); const holderMatchesRealName = ref(false); const withdrawal = ref<Withdrawal | null>(null); const financeNotice = ref(''); const withdrawing = ref(false); const contractBookId = ref(''); const contractShareBps = ref('7000'); const contractNotice = ref(''); const contractDocument = ref<{ id: string; document_text: string; document_hash: string } | null>(null)
+    async function updateSession(event: Event) { event.preventDefault(); try { const response = await fetch(`${apiBase}/api/v1/iam/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ phone: sessionPhone.value.trim(), password: sessionPassword.value }) }); if (!response.ok) throw new Error('LOGIN_FAILED'); const result = await response.json() as { access_token: string; account_id: string }; session.value = saveSession({ token: result.access_token, accountId: result.account_id }); sessionPassword.value = ''; sessionError.value = ''; void load() } catch { sessionError.value = '登录失败，请检查手机号和密码。' } }
+    function signOut(event: Event) { event.preventDefault(); clearSession(); session.value = null; sessionPhone.value = ''; sessionPassword.value = '' }
+    async function load() { if (!session.value) return; try { const profile = await request<AuthorProfile>(session.value, '/writer/api/v1/author/profile'); authorId.value = profile.id; penName.value = profile.pen_name; const [ownedBooks, calendar, authorSettlements] = await Promise.all([request<Book[]>(session.value, `/writer/api/v1/books?author_id=${encodeURIComponent(authorId.value)}`), request<WritingStat[]>(session.value, `/writer/api/v1/authors/${authorId.value}/calendar`), request<Settlement[]>(session.value, `/writer/api/v1/finance/settlements?author_id=${encodeURIComponent(authorId.value)}`)]); books.value = ownedBooks; if (!editorBookId.value && ownedBooks.length) editorBookId.value = ownedBooks[0].id; stats.value = calendar; settlements.value = authorSettlements; if (!settlementId.value) settlementId.value = authorSettlements.find((entry) => entry.status === 'WITHDRAWABLE')?.id || authorSettlements[0]?.id || '' } catch (error) { if (isHttpStatus(error, 401)) session.value = null; message.value = '数据暂时不可用，请重新登录或稍后重试。' } }
+    async function createBook(event: Event) { event.preventDefault(); if (session.value && !authorId.value) await load(); if (!title.value.trim() || !session.value || !authorId.value) { message.value = '未找到当前账号的作者资料，请先完成作者申请。'; return } try { const book = await request<Book>(session.value, '/writer/api/v1/books', { method: 'POST', body: JSON.stringify({ author_id: authorId.value, title: title.value }) }); books.value.unshift(book); editorBookId.value = book.id; title.value = ''; message.value = '作品已创建，可以继续添加卷和章节。' } catch (error) { if (isHttpStatus(error, 401)) session.value = null; message.value = '作品创建失败，请稍后重试。' } }
+    async function createVolume(event: Event) { event.preventDefault(); if (session.value && (!authorId.value || !editorBookId.value)) await load(); if (!session.value || !editorBookId.value.trim() || !volumeTitle.value.trim()) { editorMessage.value = '请先填写作品 ID 和卷标题。'; return } try { const volume = await request<Volume>(session.value, `/writer/api/v1/books/${encodeURIComponent(editorBookId.value.trim())}/volumes`, { method: 'POST', body: JSON.stringify({ title: volumeTitle.value.trim(), number: Number(volumeNumber.value) }) }); volumeId.value = volume.id; editorMessage.value = '卷已创建，可以继续创建章节。' } catch { editorMessage.value = '卷创建失败，请确认作品属于当前作者且序号未重复。' } }
+    async function createChapter(event: Event) { event.preventDefault(); if (!session.value || !volumeId.value.trim() || !chapterTitle.value.trim()) { editorMessage.value = '请先填写卷 ID 和章节标题。'; return } try { const chapter = await request<Chapter>(session.value, `/writer/api/v1/volumes/${encodeURIComponent(volumeId.value.trim())}/chapters`, { method: 'POST', body: JSON.stringify({ title: chapterTitle.value.trim(), number: Number(chapterNumber.value), commercial_policy: chapterPolicy.value }) }); chapterId.value = chapter.id; editorMessage.value = '章节已创建，可以开始写作。' } catch { editorMessage.value = '章节创建失败，请确认卷属于当前作者且序号未重复。' } }
+    async function saveDraft(event: Event) { event.preventDefault(); if (!session.value || !chapterId.value.trim()) { editorMessage.value = '请先创建章节。'; return } try { const draft = await request<DraftSnapshot>(session.value, `/writer/api/v1/chapters/${encodeURIComponent(chapterId.value.trim())}/drafts`, { method: 'POST', body: JSON.stringify({ content: editorContent.value, save_mode: 'MANUAL', ...(draftRevision.value ? { expected_revision: draftRevision.value } : {}) }) }); draftId.value = draft.id; draftRevision.value = draft.revision; editorMessage.value = '草稿已保存。' } catch { editorMessage.value = '草稿保存失败，可能是版本已更新，请重新加载后再试。' } }
+    async function createVersion(event: Event) { event.preventDefault(); if (!session.value || !chapterId.value.trim() || !draftId.value.trim()) { editorMessage.value = '请先保存草稿。'; return } try { const version = await request<ChapterVersion>(session.value, `/writer/api/v1/chapters/${encodeURIComponent(chapterId.value.trim())}/versions`, { method: 'POST', body: JSON.stringify({ snapshot_id: draftId.value }) }); editorMessage.value = `固定版本已生成 v${version.version}，可提交首发审核。` } catch { editorMessage.value = '固定版本生成失败，请先保存有效草稿。' } }
+    async function submitFirstListing(event: Event) { event.preventDefault(); if (!session.value || !reviewBookId.value.trim()) return; const fixedVersionIds = reviewVersions.value.split(',').map((value) => value.trim()).filter(Boolean); if (!fixedVersionIds.length) { message.value = '请填写至少一个固定版本 ID。'; return } try { const review = await request<Review>(session.value, `/writer/api/v1/books/${encodeURIComponent(reviewBookId.value.trim())}/first-listing-submissions`, { method: 'POST', body: JSON.stringify({ fixed_version_ids: fixedVersionIds }) }); reviews.value.unshift(review); reviewVersions.value = ''; message.value = '首发审核已提交，等待人工审核。' } catch { message.value = '首发审核提交失败，请确认作品和固定版本属于当前作者。' } }
+    async function changePenName(event: Event) { event.preventDefault(); if (!session.value || !authorId.value || !penName.value.trim()) return; try { const profile = await request<AuthorProfile>(session.value, `/writer/api/v1/author/profiles/${encodeURIComponent(authorId.value)}/pen-name`, { method: 'POST', body: JSON.stringify({ pen_name: penName.value.trim() }) }); penName.value = profile.pen_name; penNameNotice.value = '笔名申请已提交，签约账号将进入审核流程。' } catch { penNameNotice.value = '笔名修改失败，请检查规则或稍后重试。' } }
+    async function withdrawSettlement(event: Event) { event.preventDefault(); if (!session.value || !authorId.value || !settlementId.value.trim() || !Number(withdrawalAmount.value) || withdrawing.value) return; if (!holderMatchesRealName.value) { financeNotice.value = '请确认提现账户实名与作者实名一致。'; return } withdrawing.value = true; financeNotice.value = ''; try { withdrawal.value = await request<Withdrawal>(session.value, `/writer/api/v1/finance/settlements/${encodeURIComponent(settlementId.value.trim())}/withdraw`, { method: 'POST', body: JSON.stringify({ author_id: authorId.value, amount_cents: Number(withdrawalAmount.value), payout_method: payoutMethod.value, holder_matches_real_name: true }) }); financeNotice.value = '提现申请已提交，需经过 Risk 与 Finance 双重审批。' } catch (error) { financeNotice.value = isHttpStatus(error, 409) ? '该结算单状态已变化，请刷新后重试。' : '提现申请失败，请确认结算单和可提现余额。' } finally { withdrawing.value = false } }
+    async function createContract(event: Event) { event.preventDefault(); if (!session.value || !authorId.value || !contractBookId.value.trim()) return; try { const contract = await request<{ id: string; status: string; document_text: string; document_hash: string }>(session.value, '/writer/api/v1/finance/contracts', { method: 'POST', body: JSON.stringify({ author_id: authorId.value, book_id: contractBookId.value.trim(), share_bps: Number(contractShareBps.value) }) }); contractDocument.value = contract; contractNotice.value = `合同申请 ${contract.id} 已创建：${contract.status}` } catch { contractNotice.value = '合同申请失败，请确认作品归属和分成比例。' } }
     onMounted(load)
-
+    const field = (label: string, props: Record<string, unknown>) => h('label', {}, [label, h('input', props)])
     function workspace() {
-      if (view.value === '我的作品') return item('section', 'workspace-card', [item('div', 'panel-heading', [item('div', '', [item('p', 'top-kicker', 'WORKS'), item('h2', '', '作品空间')])]), h('form', { class: 'inline-form', onSubmit: createBook }, [h('input', { value: title.value, placeholder: '输入作品名', 'aria-label': '作品名', onInput: (event: Event) => { title.value = (event.target as HTMLInputElement).value } }), h('button', { class: 'writer-primary', type: 'submit' }, '创建作品')]), books.value.length ? item('ul', 'workspace-list', books.value.map((book) => h('li', { key: book.id }, [h('strong', {}, book.title), h('span', {}, `${book.lifecycle} · ${book.visibility}`)]))) : item('div', 'panel-empty', [item('div', 'empty-line', '+'), item('h3', '', '还没有作品'), item('p', '', '从这里创建第一本作品。')])])
-      if (view.value === '章节编辑') return item('section', 'workspace-card editor-card', [item('div', 'panel-heading', [item('div', '', [item('p', 'top-kicker', 'CHAPTER EDITOR'), item('h2', '', '章节编辑')]), item('p', 'workspace-note', '作品、卷、章节、草稿和固定版本按顺序保存。')]), item('div', 'editor-grid', [h('form', { class: 'editor-step', onSubmit: createVolume }, [h('h3', {}, '1. 创建卷'), h('label', {}, ['作品 ID', h('input', { value: editorBookId.value, required: true, 'aria-label': '作品 ID', onInput: (event: Event) => { editorBookId.value = (event.target as HTMLInputElement).value } })]), h('label', {}, ['卷标题', h('input', { value: volumeTitle.value, required: true, 'aria-label': '卷标题', onInput: (event: Event) => { volumeTitle.value = (event.target as HTMLInputElement).value } })]), h('label', {}, ['卷序号', h('input', { value: volumeNumber.value, type: 'number', min: 1, required: true, 'aria-label': '卷序号', onInput: (event: Event) => { volumeNumber.value = (event.target as HTMLInputElement).value } })]), h('button', { class: 'writer-primary', type: 'submit' }, '创建卷'), volumeId.value && h('output', {}, `卷 ID：${volumeId.value}`)]), h('form', { class: 'editor-step', onSubmit: createChapter }, [h('h3', {}, '2. 创建章节'), h('label', {}, ['卷 ID', h('input', { value: volumeId.value, required: true, 'aria-label': '卷 ID', onInput: (event: Event) => { volumeId.value = (event.target as HTMLInputElement).value } })]), h('label', {}, ['章节标题', h('input', { value: chapterTitle.value, required: true, 'aria-label': '章节标题', onInput: (event: Event) => { chapterTitle.value = (event.target as HTMLInputElement).value } })]), h('label', {}, ['章节序号', h('input', { value: chapterNumber.value, type: 'number', min: 1, required: true, 'aria-label': '章节序号', onInput: (event: Event) => { chapterNumber.value = (event.target as HTMLInputElement).value } })]), h('label', {}, ['商业策略', h('select', { value: chapterPolicy.value, 'aria-label': '商业策略', onChange: (event: Event) => { chapterPolicy.value = (event.target as HTMLSelectElement).value } }, [h('option', { value: 'FREE' }, '免费'), h('option', { value: 'VIP' }, 'VIP')])]), h('button', { class: 'writer-primary', type: 'submit' }, '创建章节'), chapterId.value && h('output', {}, `章节 ID：${chapterId.value}`)]), h('form', { class: 'editor-step editor-writing', onSubmit: saveDraft }, [h('h3', {}, '3. 写作与版本'), h('label', {}, ['章节正文', h('textarea', { value: editorContent.value, required: true, 'aria-label': '章节正文', rows: 12, onInput: (event: Event) => { editorContent.value = (event.target as HTMLTextAreaElement).value } })]), item('div', 'editor-actions', [h('button', { class: 'writer-primary', type: 'submit' }, '保存草稿'), h('button', { class: 'secondary-action', type: 'button', onClick: createVersion }, '生成固定版本')]), draftId.value && h('output', {}, `草稿 ID：${draftId.value} · 修订 ${draftRevision.value}`)]), editorMessage.value && item('p', 'action-message', editorMessage.value)]),])
-      if (view.value === '审核进度') return item('section', 'workspace-card', [item('p', 'top-kicker', 'REVIEW QUEUE'), item('h2', '', '固定版本审核'), h('form', { class: 'inline-form', onSubmit: submitFirstListing }, [h('input', { value: reviewBookId.value, placeholder: '作品 ID', 'aria-label': '作品 ID', required: true, onInput: (event: Event) => { reviewBookId.value = (event.target as HTMLInputElement).value } }), h('input', { value: reviewVersions.value, placeholder: '固定版本 ID，逗号分隔', 'aria-label': '固定版本 ID', required: true, onInput: (event: Event) => { reviewVersions.value = (event.target as HTMLInputElement).value } }), h('button', { class: 'writer-primary', type: 'submit' }, '提交首发审核')]), reviews.value.length ? item('ul', 'workspace-list', reviews.value.map((review) => h('li', { key: review.id }, [h('strong', {}, review.book_id), h('span', {}, `${review.status} · ${review.fixed_version_ids.length} 个版本`)]))) : item('div', 'panel-empty', [item('div', 'empty-line', '✓'), item('h3', '', '暂无审核记录'), item('p', '', '提交固定版本后，进度会显示在这里。')])])
-      if (view.value === '数据中心') return item('section', 'workspace-card', [item('p', 'top-kicker', 'METRIC CENTER'), item('h2', '', '创作日历'), stats.value.length ? item('div', 'stat-table', stats.value.map((stat) => item('div', 'stat-row', [h('span', {}, stat.business_date), h('strong', {}, `${stat.words.toLocaleString()} 字`), h('small', {}, `目标 ${stat.goal.toLocaleString()}`)]))) : item('div', 'panel-empty', [item('div', 'empty-line', '—'), item('h3', '', '暂无日统计'), item('p', '', '保存草稿后，写作事实会进入日历。')])])
-      if (view.value === '收益与结算') return item('section', 'workspace-card', [item('p', 'top-kicker', 'AUTHOR FINANCE'), item('h2', '', '收益与结算'), item('div', 'finance-rows', ['收入明细', '已锁定结算单', '可提现余额'].map((label) => item('div', 'finance-row', [h('span', {}, label), h('strong', {}, '--'), h('small', {}, '以 AuthorFinance 事实为准')]))) , h('a', { class: 'writer-primary', href: '#finance' }, '查看财务流程')])
-      if (view.value === '创作学院') return item('section', 'workspace-card', [item('p', 'top-kicker', 'LEARNING'), item('h2', '', '创作学院'), item('div', 'academy-grid', ['开篇', '人物', '剧情', '平台规则', '签约', '版权'].map((label) => item('a', 'academy-item', [h('strong', {}, label), h('span', {}, '查看课程 →')]))), item('p', 'workspace-note', '课程内容由运营 CMS 管理，正文不会执行任意脚本。')])
-      if (view.value === '账号设置') return item('section', 'workspace-card', [item('p', 'top-kicker', 'ACCOUNT'), item('h2', '', '账号设置'), item('div', 'setting-line', [h('span', {}, '当前账号'), h('strong', {}, session.value?.accountId || '未登录')]), item('div', 'setting-line', [h('span', {}, '作者资料'), h('strong', {}, '由作者服务返回')]), item('p', 'workspace-note', '笔名修改会保留历史记录，签约后需经过独立审核。')])
-      return item('section', 'workspace-card', [item('p', 'top-kicker', 'NEXT CHAPTER'), item('h2', '', '今天也写一点。'), item('p', 'workspace-note', '作品、草稿、固定版本审核和结算单都从明确的 Domain 命令产生。'), item('div', 'quick-actions', [h('a', { class: 'writer-primary', href: '?view=我的作品' }, '管理作品'), h('a', { class: 'secondary-action', href: '?view=数据中心' }, '查看创作数据')])])
+      if (view.value === '我的作品') return item('section', 'workspace-card works-panel', [item('div', 'section-heading', [item('div', 'heading-rule'), item('div', '', [item('p', 'section-kicker', '作品管理'), h('h2', {}, '创建你的第一部作品'), h('p', { class: 'workspace-note' }, '给故事一个开始，让更多读者遇见你的世界。')])]), h('form', { class: 'inline-form', onSubmit: createBook }, [h('input', { value: title.value, placeholder: '输入作品名（如：星辰与远方）', 'aria-label': '作品名', onInput: (event: Event) => { title.value = (event.target as HTMLInputElement).value } }), h('button', { class: 'writer-primary', type: 'submit' }, [icon('edit'), '创建作品'])]), message.value && item('p', 'action-message', message.value), books.value.length ? item('ul', 'workspace-list', books.value.map((book) => h('li', { key: book.id }, [h('strong', {}, book.title), h('span', {}, `${book.lifecycle} · ${book.visibility}`)]))) : item('div', 'panel-empty', [item('div', 'empty-illustration', icon('file')), h('h3', {}, '还没有作品'), h('p', {}, '从这里创建第一本作品，开启你的创作之旅。')])])
+      if (view.value === '章节编辑') return item('section', 'workspace-card editor-card', [item('div', 'section-heading', [item('div', 'heading-rule'), item('div', '', [item('p', 'section-kicker', 'CHAPTER EDITOR'), h('h2', {}, '章节编辑'), h('p', { class: 'workspace-note' }, '作品、卷、章节、草稿和固定版本均保存在这里，方便你有序创作。')])]), item('div', 'editor-grid', [h('form', { class: 'editor-step', onSubmit: createVolume }, [item('div', 'step-title', [h('span', {}, '1'), h('h3', {}, '创建卷')]), h('p', { class: 'step-note' }, '先创建卷，再编写章节。'), field('作品 ID', { value: editorBookId.value, required: true, 'aria-label': '作品 ID', onInput: (event: Event) => { editorBookId.value = (event.target as HTMLInputElement).value } }), field('卷标题', { value: volumeTitle.value, required: true, 'aria-label': '卷标题', onInput: (event: Event) => { volumeTitle.value = (event.target as HTMLInputElement).value } }), field('卷序号', { value: volumeNumber.value, type: 'number', min: 1, required: true, 'aria-label': '卷序号', onInput: (event: Event) => { volumeNumber.value = (event.target as HTMLInputElement).value } }), h('button', { class: 'writer-primary', type: 'submit' }, ['+', '创建卷']), volumeId.value && h('output', {}, `卷 ID：${volumeId.value}`)]), h('form', { class: 'editor-step', onSubmit: createChapter }, [item('div', 'step-title', [h('span', {}, '2'), h('h3', {}, '创建章节')]), h('p', { class: 'step-note' }, '在已有卷下创建新章节。'), field('卷 ID', { value: volumeId.value, required: true, 'aria-label': '卷 ID', onInput: (event: Event) => { volumeId.value = (event.target as HTMLInputElement).value } }), field('章节标题', { value: chapterTitle.value, required: true, 'aria-label': '章节标题', onInput: (event: Event) => { chapterTitle.value = (event.target as HTMLInputElement).value } }), field('章节序号', { value: chapterNumber.value, type: 'number', min: 1, required: true, 'aria-label': '章节序号', onInput: (event: Event) => { chapterNumber.value = (event.target as HTMLInputElement).value } }), h('label', {}, ['商业策略', h('select', { value: chapterPolicy.value, 'aria-label': '商业策略', onChange: (event: Event) => { chapterPolicy.value = (event.target as HTMLSelectElement).value } }, [h('option', { value: 'FREE' }, '免费'), h('option', { value: 'VIP' }, 'VIP')])]), h('button', { class: 'writer-primary', type: 'submit' }, ['+', '创建章节']), chapterId.value && h('output', {}, `章节 ID：${chapterId.value}`)]), h('form', { class: 'editor-step editor-writing', onSubmit: saveDraft }, [item('div', 'step-title', [h('span', {}, '3'), h('h3', {}, '写作与版本')]), h('p', { class: 'step-note' }, '在这里写下你的内容，并保存草稿或生成固定版本。'), h('label', {}, ['章节正文', h('textarea', { value: editorContent.value, required: true, 'aria-label': '章节正文', rows: 12, placeholder: '在这里，写下你的故事……', onInput: (event: Event) => { editorContent.value = (event.target as HTMLTextAreaElement).value } })]), item('div', 'editor-actions', [h('button', { class: 'writer-primary', type: 'submit' }, [icon('file'), '保存草稿']), h('button', { class: 'secondary-action', type: 'button', onClick: createVersion }, [icon('file'), '生成固定版本'])]), draftId.value && h('output', {}, `草稿 ID：${draftId.value} · 修订 ${draftRevision.value}`)]), editorMessage.value && item('p', 'action-message', editorMessage.value)])])
+      if (view.value === '审核进度') return item('section', 'workspace-card review-panel', [item('div', 'section-heading', [item('div', 'heading-rule'), item('div', '', [item('p', 'section-kicker', 'REVIEW QUEUE'), h('h2', {}, '固定版本审核'), h('p', { class: 'workspace-note' }, '提交固定版本后，将进入审核队列。审核通过后，作品即可正式发布。')])]), h('form', { class: 'review-form', onSubmit: submitFirstListing }, [h('input', { value: reviewBookId.value, placeholder: '作品 ID', 'aria-label': '作品 ID', required: true, onInput: (event: Event) => { reviewBookId.value = (event.target as HTMLInputElement).value } }), h('input', { value: reviewVersions.value, placeholder: '固定版本 ID，逗号分隔', 'aria-label': '固定版本 ID', required: true, onInput: (event: Event) => { reviewVersions.value = (event.target as HTMLInputElement).value } }), h('button', { class: 'writer-primary', type: 'submit' }, '提交首发审核')]), message.value && item('p', 'action-message', message.value), reviews.value.length ? item('ul', 'workspace-list', reviews.value.map((review) => h('li', { key: review.id }, [h('strong', {}, review.book_id), h('span', {}, `${review.status} · ${review.fixed_version_ids.length} 个版本`)]))) : item('div', 'panel-empty review-empty', [item('div', 'empty-illustration', icon('clock')), h('h3', {}, '暂无审核记录'), h('p', {}, '提交固定版本后，进度会显示在这里。')])])
+      if (view.value === '数据中心') return item('section', 'workspace-card data-panel', [item('div', 'section-heading', [item('div', 'heading-rule'), item('div', '', [item('p', 'section-kicker', '指标中心'), h('h2', {}, '创作日历'), h('p', { class: 'workspace-note' }, '坚持创作，积累看得见的进步。')])]), item('div', 'calendar-layout', [item('div', 'calendar-grid-wrap', [item('div', 'calendar-month', [h('button', { class: 'round-arrow', type: 'button' }, '‹'), h('strong', {}, '2024年 11月'), h('button', { class: 'round-arrow', type: 'button' }, '›')]), item('div', 'calendar-week', ['周一', '周二', '周三', '周四', '周五', '周六', '周日'].map((day) => h('span', {}, day))), item('div', 'calendar-grid', Array.from({ length: 35 }, (_, index) => item('span', ['calendar-cell', stats.value[index % Math.max(stats.value.length, 1)]?.words ? 'level-2' : ''], ''))), item('div', 'calendar-legend', ['无创作', '1-999字', '1000-2999字', '3000-4999字', '5000字以上'].map((label, index) => item('span', ['legend-item', index ? `level-${index}` : ''], [h('i', {}), label])))]), item('div', 'data-empty', [icon('chart'), h('h3', {}, stats.value.length ? `${stats.value.reduce((sum, stat) => sum + stat.words, 0).toLocaleString()} 字` : '暂无日统计'), h('p', {}, '保存草稿后，写作事实会进入日历。'), h('small', {}, '每一个字，都是向着更好的自己的靠近。')])])])
+      if (view.value === '收益与结算') return item('section', 'workspace-card finance-panel', [item('div', 'section-heading', [item('div', 'heading-rule'), item('div', '', [item('p', 'section-kicker', 'AUTHOR FINANCE（金融）'), h('h2', {}, '收益与结算'), h('p', { class: 'workspace-note' }, '收益明细和结算单由 AuthorFinance 服务产生，提现申请不会直接修改余额。')])]), settlements.value.length ? item('ul', 'workspace-list settlement-list', settlements.value.map((settlement) => h('li', { key: settlement.id }, [h('strong', {}, `${settlement.period} · ${(settlement.amount_cents / 100).toFixed(2)} 元`), h('span', {}, `${settlement.status} · 已提现 ${(settlement.withdrawn_cents / 100).toFixed(2)} 元`)]))) : item('div', 'panel-empty compact', [h('h3', {}, '暂无结算单'), h('p', {}, '结算周期完成并经财务确认后会出现在这里。')]), item('div', 'withdraw-card', [item('div', 'withdraw-heading', [item('div', 'finance-symbol', '¥'), item('div', '', [h('h3', {}, '申请提现'), h('p', {}, '填写提现信息，发起提现申请。平台会根据审核情况进行后续处理。')])]), h('form', { class: 'finance-form', onSubmit: withdrawSettlement }, [field('结算单 ID', { value: settlementId.value, list: 'settlement-options', required: true, 'aria-label': '结算单 ID', onInput: (event: Event) => { settlementId.value = (event.target as HTMLInputElement).value } }), h('label', {}, ['提现金额（分）', h('input', { value: withdrawalAmount.value, required: true, min: 1000, type: 'number', 'aria-label': '提现金额（分）', onInput: (event: Event) => { withdrawalAmount.value = (event.target as HTMLInputElement).value } })]), h('label', {}, ['提现渠道', h('select', { value: payoutMethod.value, 'aria-label': '提现渠道', onChange: (event: Event) => { payoutMethod.value = (event.target as HTMLSelectElement).value } }, [h('option', { value: 'ALIPAY' }, '支付宝'), h('option', { value: 'BANK' }, '银行卡')])]), h('label', { class: 'check-line' }, [h('input', { type: 'checkbox', checked: holderMatchesRealName.value, onChange: (event: Event) => { holderMatchesRealName.value = (event.target as HTMLInputElement).checked } }), '提现账户实名与作者实名一致']), h('button', { class: 'writer-primary', disabled: withdrawing.value, type: 'submit' }, withdrawing.value ? '提交中...' : '提交提现申请'), h('datalist', { id: 'settlement-options' }, settlements.value.map((settlement) => h('option', { value: settlement.id }, `${settlement.period} · ${settlement.status}`)))]), financeNotice.value && item('p', 'action-message', financeNotice.value), withdrawal.value ? item('div', 'finance-state', [h('strong', {}, withdrawal.value.status), h('span', {}, `申请 ${withdrawal.value.id} · ${withdrawal.value.amount_cents} 分`)]) : item('div', 'panel-empty finance-empty', [item('div', 'empty-illustration', '￥'), h('h3', {}, '暂无提现申请'), h('p', {}, '您提交的提现申请将显示在这里。')])])])
+      if (view.value === '创作学院') return item('section', 'workspace-card academy-panel', [item('div', 'section-heading', [item('div', 'heading-rule'), item('div', '', [item('p', 'section-kicker', '学习成长'), h('h2', {}, '在这里，遇见更好的创作者。'), h('p', { class: 'workspace-note' }, '从基础到进阶，系统掌握小说创作的核心方法与行业知识。')])]), item('div', 'academy-grid', [['开篇', '如何写出抓人的开头，打动你的读者。', 'file'], ['人物', '塑造鲜活的人物，让角色跃然纸上。', 'edit'], ['剧情', '构建合理的剧情结构，让故事张弛有度。', 'chart'], ['平台规则', '了解平台规范，助力作品顺利发布。', 'cap'], ['签约', '从新人到签约，掌握关键流程与技巧。', 'file'], ['版权', '认识版权保护，守护你的创作成果。', 'clock']].map(([label, copy, iconName]) => item('a', 'academy-item', [item('div', `academy-icon academy-${iconName}`, icon(iconName)), item('div', '', [h('strong', {}, label), h('p', {}, copy), h('span', {}, '查看课程 →')])]))), h('p', { class: 'workspace-note' }, '课程内容由运营 CMS 管理，正文不会执行任意脚本。')])
+      if (view.value === '账号设置') return item('section', 'workspace-card settings-panel', [item('div', 'section-heading', [item('div', 'heading-rule'), item('div', '', [item('p', 'section-kicker', '账户信息'), h('h2', {}, '账号设置'), h('p', { class: 'workspace-note' }, '管理你的账号与签约信息，确保相关信息准确有效。')])]), item('div', 'setting-line account-row', [h('span', {}, '当前账号'), h('strong', {}, session.value?.accountId || '未登录'), icon('file')]), h('form', { class: 'settings-form', onSubmit: changePenName }, [field('笔名', { value: penName.value, required: true, 'aria-label': '笔名', onInput: (event: Event) => { penName.value = (event.target as HTMLInputElement).value } }), h('button', { class: 'writer-primary', type: 'submit' }, '提交笔名修改')]), penNameNotice.value && item('p', 'action-message', penNameNotice.value), h('form', { class: 'settings-form contract-form', onSubmit: createContract }, [field('签约作品 ID', { value: contractBookId.value, required: true, 'aria-label': '签约作品 ID', onInput: (event: Event) => { contractBookId.value = (event.target as HTMLInputElement).value } }), field('作者分成（BPS）', { value: contractShareBps.value, min: 1, max: 10000, type: 'number', required: true, 'aria-label': '作者分成 BPS', onInput: (event: Event) => { contractShareBps.value = (event.target as HTMLInputElement).value } }), h('button', { class: 'writer-primary', type: 'submit' }, '提交签约申请')]), contractNotice.value && item('p', 'action-message', contractNotice.value), contractDocument.value && item('div', 'contract-document', [h('strong', {}, `虚拟合同 ${contractDocument.value.id}`), h('pre', {}, contractDocument.value.document_text), h('small', {}, `SHA-256：${contractDocument.value.document_hash}`)]), h('p', { class: 'workspace-note' }, '笔名修改会保留历史记录，签约后需经过独立审核；合同状态由 AuthorFinance 服务返回。')])
+      return item('section', 'workspace-card next-panel', [item('div', 'section-heading', [item('div', 'heading-rule'), item('div', '', [item('p', 'section-kicker', '下一步创作'), h('h2', {}, '今天也写一点。'), h('p', { class: 'workspace-note' }, '作品、草稿、固定版本审核和结算单都从明确的 Domain 命令产生。')])]), item('div', 'quick-actions', [h('a', { class: 'writer-primary', href: '?view=我的作品' }, [icon('edit'), '管理作品']), h('a', { class: 'secondary-action', href: '?view=数据中心' }, [icon('chart'), '查看创作数据'])])])
     }
-
-    return () => !session.value
-      ? sessionView(sessionToken.value, sessionAccountId.value, sessionError.value, updateSession, (event) => { sessionToken.value = (event.target as HTMLInputElement).value }, (event) => { sessionAccountId.value = (event.target as HTMLInputElement).value })
-      : state.value !== 'ready' ? stateView(state.value) : item('div', 'writer-shell', [item('aside', 'writer-sidebar', [item('div', 'writer-logo', ['墨页', item('small', '', 'WRITER CENTER')]), item('div', 'workspace-label', '创作空间'), item('nav', 'writer-nav', ['工作台', '我的作品', '章节编辑', '审核进度', '数据中心', '收益与结算'].map((label) => link(label, label === view.value))), item('div', 'sidebar-bottom', [link('创作学院', view.value === '创作学院'), link('账号设置', view.value === '账号设置'), h('a', { class: 'side-link', href: '#sign-out', onClick: signOut }, '退出登录')])]), item('div', 'writer-content', [item('header', 'writer-topbar', [item('div', '', [item('p', 'top-kicker', 'WRITER CENTER'), item('h1', '', view.value)]), item('div', 'top-actions', [h('span', {}, session.value.accountId)])]), item('main', 'writer-main', [item('section', 'writer-welcome', [item('div', '', [item('p', 'top-kicker', 'AUTHOR WORKSPACE'), item('h2', '', view.value === '工作台' ? '今天也写一点。' : view.value), item('p', 'welcome-copy', message.value || '业务状态和操作结果会在这里反馈。')]), h('a', { class: 'writer-primary', href: '?view=我的作品' }, '进入作品')]), item('section', 'writer-stats', [item('article', 'stat-block', [h('span', {}, '作品'), h('strong', {}, String(books.value.length)), h('small', {}, '当前作者范围')]), item('article', 'stat-block', [h('span', {}, '今日字数'), h('strong', {}, stats.value.length ? String(stats.value.at(-1)?.words ?? '--') : '--'), h('small', {}, '由写作事实汇总')]), item('article', 'stat-block', [h('span', {}, '结算状态'), h('strong', {}, '待查'), h('small', {}, '由财务域提供')])]), workspace(), item('section', 'writer-tip', [h('span', { class: 'tip-index' }, '01'), item('div', '', [h('h3', {}, '发布提醒'), h('p', {}, '发布章节会创建固定版本并进入审核工作流。')]), h('a', { href: '?view=审核进度' }, '查看审核 →')])])])])
+    return () => !session.value ? sessionView(sessionPhone.value, sessionPassword.value, sessionError.value, updateSession, (event) => { sessionPhone.value = (event.target as HTMLInputElement).value }, (event) => { sessionPassword.value = (event.target as HTMLInputElement).value }) : state.value !== 'ready' ? stateView(state.value) : item('div', 'writer-shell', [item('aside', 'writer-sidebar', [item('div', 'writer-brand', [h('strong', {}, '墨页'), item('small', '', 'WRITER CENTER'), h('span', { class: 'brand-mark' }, '◢')]), item('div', 'workspace-label', '创作空间'), item('nav', 'writer-nav', navItems.map(([label, iconName]) => link(label, label === view.value, iconName))), item('div', 'sidebar-bottom', [link('创作学院', view.value === '创作学院', 'cap'), link('账号设置', view.value === '账号设置', 'gear'), h('a', { class: 'side-link', href: '#sign-out', onClick: signOut }, [icon('logout'), h('span', {}, '退出登录')])]), item('div', 'sidebar-motto', ['用文字，', h('br'), '记录更大的世界。', h('i', {})])]), item('div', 'writer-content', [item('header', 'writer-topbar', [item('div', '', [h('p', { class: 'top-kicker' }, 'WRITER CENTER'), h('h1', {}, heroCopy[view.value]?.title || view.value), h('p', { class: 'top-subtitle' }, heroCopy[view.value]?.subtitle || '')]), item('div', 'top-actions', [item('div', 'notification-wrap', [icon('bell'), item('span', 'notification-dot')]), item('div', 'author-menu', [item('div', 'author-avatar', '墨'), h('span', {}, session.value.accountId), h('span', { class: 'chevron' }, '⌄')])])]), item('main', 'writer-main', [item('section', 'hero-banner', [item('div', 'hero-copy', [h('p', { class: 'hero-kicker' }, heroCopy[view.value]?.kicker || 'WRITER CENTER'), h('h2', {}, heroCopy[view.value]?.title || view.value), h('p', {}, heroCopy[view.value]?.subtitle || ''), h('a', { class: 'writer-primary hero-button', href: view.value === '数据中心' ? '?view=数据中心' : '?view=我的作品' }, [icon(view.value === '创作学院' ? 'cap' : 'edit'), heroCopy[view.value]?.button || '进入作品', icon('arrow')])]), item('div', 'hero-note', ['持续创作', h('br'), '让想象落地生根', h('i', {})])]), item('section', 'writer-stats', [item('article', 'stat-block stat-works', [item('div', 'stat-icon', icon('file')), item('div', '', [h('span', {}, '作品'), h('strong', {}, String(books.value.length)), h('small', {}, '当前作者范围')]), icon('arrow', 'stat-arrow')]), item('article', 'stat-block stat-words', [item('div', 'stat-icon', icon('edit')), item('div', '', [h('span', {}, '今日字数'), h('strong', {}, stats.value.length ? String(stats.value.at(-1)?.words ?? 0) : '0'), h('small', {}, '由写作事实汇总')]), icon('arrow', 'stat-arrow')]), item('article', 'stat-block stat-finance', [item('div', 'stat-icon', icon('wallet')), item('div', '', [h('span', {}, '收益与结算'), h('strong', {}, '收益与结算'), h('small', {}, '点击前往提交提现')]), icon('arrow', 'stat-arrow')])]), workspace(), item('section', 'writer-tip', [item('div', 'tip-icon', icon('bell')), h('strong', {}, '发布提醒'), h('p', {}, '发布章节会创建固定版本并进入审核工作流。'), h('a', { href: '?view=审核进度' }, ['查看审核', icon('arrow')])]), h('footer', { class: 'writer-footer' }, [h('strong', {}, '墨页'), h('span', {}, 'WRITER CENTER'), h('i', {}, '|'), h('span', {}, '用文字连接世界'), h('em', {}, '创作，让平凡的日子也闪闪发光。')])])])])
   },
 })
 

@@ -61,6 +61,21 @@ class ContentService:
         except KeyError as exc:
             raise KeyError(f"book {book_id} not found") from exc
 
+    def list_books_for_author(self, author_id: str) -> list[tuple[Book, BookMetadataVersion]]:
+        if not author_id.strip():
+            raise ValueError("AUTHOR_ID_REQUIRED")
+        return [
+            (book, self.get_book_metadata(book.id))
+            for book in sorted(self._books.values(), key=lambda item: item.id)
+            if book.author_id == author_id
+        ]
+
+    def list_all_books(self) -> list[tuple[Book, BookMetadataVersion]]:
+        return [
+            (book, self.get_book_metadata(book.id))
+            for book in sorted(self._books.values(), key=lambda item: item.id)
+        ]
+
     def get_book_metadata(self, book_id: str, public_only: bool = False) -> BookMetadataVersion:
         book = self.get_book(book_id)
         if public_only and book.public_metadata_version_id is None:

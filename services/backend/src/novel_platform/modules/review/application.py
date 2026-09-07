@@ -49,6 +49,33 @@ class ReviewService:
         self.content.set_book_visibility(book_id, BookVisibility.PENDING_FIRST_REVIEW)
         return submission
 
+    def submit_chapter_update(self, book_id: str, fixed_version_ids: list[str]) -> ReviewSubmission:
+        book = self.content.get_book(book_id)
+        if book.visibility is not BookVisibility.PUBLIC:
+            raise ValueError("chapter update requires a public book")
+        if not fixed_version_ids:
+            raise ValueError("chapter update requires at least one fixed version")
+        if len(fixed_version_ids) != len(set(fixed_version_ids)):
+            raise ValueError("fixed chapter versions must be unique")
+        chapter_ids: set[str] = set()
+        for version_id in fixed_version_ids:
+            version = self.content.get_chapter_version(version_id)
+            chapter = self.content.get_chapter(version.chapter_id)
+            volume = self.content.get_volume(chapter.volume_id)
+            if volume.book_id != book.id:
+                raise ValueError("fixed chapter version does not belong to book")
+            if chapter.id in chapter_ids:
+                raise ValueError("chapter update allows one version per chapter")
+            chapter_ids.add(chapter.id)
+        submission = ReviewSubmission(
+            id=_id("SUB"),
+            book_id=book_id,
+            submission_type="CHAPTER_UPDATE",
+            fixed_version_ids=tuple(fixed_version_ids),
+        )
+        self._submissions[submission.id] = submission
+        return submission
+
     def get_submission(self, submission_id: str) -> ReviewSubmission:
         return self._submissions[submission_id]
 

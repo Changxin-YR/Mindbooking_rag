@@ -75,6 +75,18 @@ def test_chapter_commercial_policy_uses_commerce_permission() -> None:
     )
 
 
+def test_finance_and_agent_routes_use_domain_permissions() -> None:
+    assert _admin_permission("/admin/api/v1/invoices/inv-1/issue", "POST") == ("finance.write")
+    assert _admin_permission("/admin/api/v1/agent/resources", "GET") == "agent.execute"
+    assert _admin_permission("/admin/api/v1/agent/audits", "GET") == "agent.audit.read"
+    assert _admin_permission("/admin/api/v1/finance/contracts/ctr-1/approve", "POST") == (
+        "approval.write"
+    )
+    assert _admin_permission("/admin/api/v1/finance/contracts/ctr-1/activate", "POST") == (
+        "approval.write"
+    )
+
+
 def test_review_collection_scope_filters_assigned_submissions_in_service() -> None:
     service = ReviewService.__new__(ReviewService)
     service._submissions = {

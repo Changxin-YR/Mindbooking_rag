@@ -3,6 +3,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, cast
 
 import sqlalchemy as sa
@@ -24,7 +25,15 @@ from novel_platform.interfaces.http.health import build_health_router
 from novel_platform.modules.admin_center.api import build_admin_center_router
 from novel_platform.modules.admin_center.application import AdminCenterService
 from novel_platform.modules.admin_center.sql_service import SqlAdminCenterService
-from novel_platform.modules.agent import AgentGateway, InMemoryAgentAuditLog, ToolResource
+from novel_platform.modules.agent import (
+    AgentGateway,
+    InMemoryAgentAuditLog,
+    ToolResource,
+    build_agent_admin_router,
+    build_agent_gateway_router,
+    build_agent_runtime_router,
+)
+from novel_platform.modules.agent.runtime import HarnessSessionManager
 from novel_platform.modules.agent.sql_audit import SqlAgentAuditSink
 from novel_platform.modules.approval.api import build_approval_router
 from novel_platform.modules.approval.application import ApprovalService
@@ -34,6 +43,7 @@ from novel_platform.modules.author.http import build_author_router
 from novel_platform.modules.author.repository import InMemoryAuthorRepository, SqlAuthorRepository
 from novel_platform.modules.author_center.api import build_author_center_router
 from novel_platform.modules.author_center.application import AuthorCenterService
+from novel_platform.modules.author_center.sql_service import SqlAuthorCenterService
 from novel_platform.modules.author_finance.api import (
     build_author_finance_router,
     build_payout_callback_router,
@@ -59,10 +69,11 @@ from novel_platform.modules.governance.api import build_governance_router
 from novel_platform.modules.governance.application import GovernanceService
 from novel_platform.modules.governance.domain import OutboxEvent
 from novel_platform.modules.governance.sql_service import SqlGovernanceService
-from novel_platform.modules.governance.worker import OutboxWorker
+from novel_platform.modules.governance.worker import OutboxWorker, SearchProjectionHandler
 from novel_platform.modules.iam.application import IdentityApplication
 from novel_platform.modules.iam.http import build_iam_router
 from novel_platform.modules.iam.repository import InMemoryIdentityRepository, SqlIdentityRepository
+from novel_platform.modules.integrations.provider import build_sandbox_provider_registry
 from novel_platform.modules.legal.api import build_legal_router
 from novel_platform.modules.legal.application import LegalService
 from novel_platform.modules.legal.sql_service import SqlLegalService
@@ -81,7 +92,7 @@ from novel_platform.modules.operation.api import (
 )
 from novel_platform.modules.operation.application import OperationService
 from novel_platform.modules.operation.sql_service import SqlOperationService
-from novel_platform.modules.payment import SandboxPaymentProvider, SandboxPayoutProvider
+from novel_platform.modules.payment import build_payment_provider, build_payout_provider
 from novel_platform.modules.platform.application import PlatformApplication
 from novel_platform.modules.platform.http import build_platform_router
 from novel_platform.modules.platform.repository import (
@@ -100,12 +111,14 @@ from novel_platform.modules.reading.application import ReadingService
 from novel_platform.modules.reading.sql_service import SqlReadingService
 from novel_platform.modules.review.api import build_review_routers
 from novel_platform.modules.review.application import ReviewService
+from novel_platform.modules.review.domain import ReviewDecision
 from novel_platform.modules.review.sql_service import SqlReviewService
 from novel_platform.modules.risk.api import build_risk_router
 from novel_platform.modules.risk.application import RiskService
 from novel_platform.modules.risk.sql_service import SqlRiskService
 from novel_platform.modules.search import (
     BookSearchFact,
+    InMemorySearchProjectionStore,
     OpenSearchSearchAdapter,
     RefreshingSearchAdapter,
     SearchService,
@@ -124,7 +137,32 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     settings = Settings.from_env()
+    settings.validate_runtime()
+    settings.validate_integration_runtime()
+    if settings.app_env in {"production", "prod"} and (
+        settings.payment_provider != "SANDBOX" or settings.payout_provider != "SANDBOX_PAYOUT"
+    ):
+        raise ValueError("PRODUCTION_PROVIDER_ADAPTER_NOT_IMPLEMENTED")
     app = FastAPI(title=settings.app_name, version=settings.app_version)
+    integration_registry = build_sandbox_provider_registry(
+        sms_provider=settings.sms_provider,
+        oauth_wechat_provider=settings.oauth_wechat_provider,
+        oauth_qq_provider=settings.oauth_qq_provider,
+        realname_provider=settings.realname_provider,
+        moderation_provider=settings.moderation_provider,
+        storage_provider=settings.storage_provider,
+        notification_provider=settings.notification_provider,
+    )
+    app.state.integration_registry = integration_registry
+    app.state.sandbox_provider_registry = integration_registry
+    app.state.sandbox_integrations = integration_registry
+    app.state.integration_health = {
+        **integration_registry.health(),
+        "status": "ok",
+        "sandbox": True,
+    }
+    app.state.sandbox_provider_health = app.state.integration_health
+    app.state.integration_provider_health = app.state.integration_health
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -200,25 +238,35 @@ def create_app() -> FastAPI:
             "support.read",
             "support.write",
             "platform.manage",
+            "governance.read",
             "governance.write",
+            "agent.audit.read",
+            "agent.audit.sensitive",
+            "agent.execute",
+            "content.read",
         ):
             platform.grant_permission(bootstrap_id, permission)
         platform.grant_data_scope(bootstrap_id, "ALL", "*")
     content = SqlContentService(engine) if engine is not None else ContentService()
     app.state.content_service = content
-    search_facts = lambda: (
-        BookSearchFact(
-            book_id=book.id,
-            title=metadata.title,
-            synopsis=metadata.synopsis,
-            category=metadata.category,
-            channel=metadata.channel,
-            status=book.lifecycle.value,
-            tags=metadata.tags,
+
+    def search_facts() -> tuple[BookSearchFact, ...]:
+        return tuple(
+            BookSearchFact(
+                book_id=book.id,
+                title=metadata.title,
+                synopsis=metadata.synopsis,
+                category=metadata.category,
+                channel=metadata.channel,
+                status=book.lifecycle.value,
+                tags=metadata.tags,
+            )
+            for book, metadata in content.list_public_books()
         )
-        for book, metadata in content.list_public_books()
-    )
+
     fallback_search = RefreshingSearchAdapter(search_facts)
+    search_projection = InMemorySearchProjectionStore(search_facts())
+    app.state.search_projection = search_projection
     search = SearchService(
         OpenSearchSearchAdapter(search_facts, settings.opensearch_url)
         if settings.opensearch_url
@@ -233,12 +281,36 @@ def create_app() -> FastAPI:
             name="content.get_book",
             description="Read public book metadata through ContentService",
             permission="content.read",
+            input_schema={
+                "type": "object",
+                "properties": {"book_id": {"type": "string", "minLength": 1}},
+                "required": ["book_id"],
+                "additionalProperties": False,
+            },
         ),
         lambda arguments: asdict(
             content.get_book_metadata(str(arguments["book_id"]), public_only=True)
         ),
     )
     app.state.agent_gateway = agent_gateway
+    app.state.agent_runner = HarnessSessionManager(
+        backend_url=settings.agent_backend_url,
+        dsh_home=settings.agent_dsh_home,
+        project_root=str(Path(__file__).resolve().parents[4]),
+        provider=settings.agent_harness_provider,
+        model=settings.agent_harness_model,
+        api_key=settings.agent_harness_api_key or None,
+        base_url=settings.agent_harness_base_url or None,
+        profile=settings.agent_harness_profile,
+        request_timeout_seconds=settings.agent_harness_timeout_seconds,
+        runtime_mode=settings.agent_harness_runtime_mode,
+        web_command=settings.agent_harness_web_command or None,
+        dsh_bin=settings.agent_harness_dsh_bin or None,
+        harness_repo=settings.agent_harness_repo or None,
+        web_start_timeout_seconds=settings.agent_harness_web_start_timeout_seconds,
+        web_bridge_url=settings.agent_harness_web_bridge_url,
+        web_bridge_secret=settings.agent_harness_web_bridge_secret,
+    )
     review = SqlReviewService(engine, content) if engine is not None else ReviewService(content)
     app.state.review_service = review
     reading = SqlReadingService(engine) if engine is not None else ReadingService()
@@ -273,12 +345,14 @@ def create_app() -> FastAPI:
         if engine is not None
         else CommerceService(wallet, identity.is_real_named)
     )
-    payment_provider = SandboxPaymentProvider(
-        settings.payment_callback_secret,
-        provider_name="SANDBOX",
+    payment_provider = build_payment_provider(
+        settings.payment_provider, settings.payment_callback_secret
     )
     commerce.payment_provider = payment_provider
     commerce.payment_provider_secret = settings.payment_callback_secret
+    if isinstance(membership, SqlMembershipService):
+        membership.payment_provider = payment_provider
+        membership.payment_provider_secret = settings.payment_callback_secret
     app.state.commerce_service = commerce
     refunds: RefundService
     if engine is not None:
@@ -317,9 +391,8 @@ def create_app() -> FastAPI:
     author_finance = (
         SqlAuthorFinanceService(engine) if engine is not None else AuthorFinanceService()
     )
-    payout_provider = SandboxPayoutProvider(
-        settings.payment_callback_secret,
-        provider_name="SANDBOX_PAYOUT",
+    payout_provider = build_payout_provider(
+        settings.payout_provider, settings.payment_callback_secret
     )
     author_finance.payout_provider = payout_provider
     author_finance.payout_provider_secret = settings.payment_callback_secret
@@ -338,9 +411,10 @@ def create_app() -> FastAPI:
             purchase_no: str,
             gross_cents: int,
         ) -> object:
-            chapter = content.get_chapter(chapter_id)
-            volume = content.get_volume(chapter.volume_id)
-            book = content.get_book(volume.book_id)
+            sql_content = cast(SqlContentService, content)
+            _, _volume, book = sql_content.get_chapter_context_for_connection(
+                connection, chapter_id
+            )
             sql_author_finance = cast(SqlAuthorFinanceService, author_finance)
             return sql_author_finance.record_revenue_in_transaction(
                 connection,
@@ -354,9 +428,118 @@ def create_app() -> FastAPI:
         commerce.record_revenue_in_transaction = record_chapter_revenue_from_content
     operation = SqlOperationService(engine) if engine is not None else OperationService()
     app.state.operation_service = operation
-    author_center = AuthorCenterService(operation)
+    author_center = (
+        SqlAuthorCenterService(engine, operation)
+        if engine is not None
+        else AuthorCenterService(operation)
+    )
+    app.state.author_center_service = author_center
     admin_center = SqlAdminCenterService(engine) if engine is not None else AdminCenterService()
     app.state.admin_center_service = admin_center
+    agent_gateway.register(
+        ToolResource(
+            name="content.list_books",
+            description="List books visible to the current staff data scope",
+            permission="content.read",
+            input_schema={"type": "object", "additionalProperties": False},
+        ),
+        lambda _arguments, context: [
+            {
+                "id": book.id,
+                "author_id": book.author_id,
+                "title": metadata.title,
+                "lifecycle": book.lifecycle.value,
+                "visibility": book.visibility.value,
+            }
+            for book, metadata in content.list_all_books()
+            if platform.can_access(context.actor_id, "content.read", "ALL", "*")
+        ],
+    )
+    agent_gateway.register(
+        ToolResource(
+            name="review.list_pending",
+            description="List pending review submissions in the current staff assignment scope",
+            permission="review.read",
+            input_schema={"type": "object", "additionalProperties": False},
+        ),
+        lambda _arguments, context: [
+            asdict(item)
+            for scope_type, scope_value in context.data_scopes
+            for item in review.list_submissions_for_scope(scope_type, scope_value)
+            if item.status.value == "PENDING"
+        ],
+    )
+
+    def decide_review_from_agent(arguments: dict[str, Any], context: Any) -> dict[str, object]:
+        if context is None or not platform.has_permission(context.actor_id, "review.decide"):
+            from novel_platform.modules.agent.application import PermissionDenied
+
+            raise PermissionDenied("agent actor lacks review decision permission")
+        if set(arguments) != {"submission_id", "decision"}:
+            raise ValueError("review decision arguments must contain submission_id and decision")
+        submission_id = arguments["submission_id"]
+        decision_value = arguments["decision"]
+        if not isinstance(submission_id, str) or not submission_id.strip():
+            raise ValueError("submission_id is required")
+        if not isinstance(decision_value, str):
+            raise TypeError("decision must be a string")
+        try:
+            decision = ReviewDecision(decision_value)
+        except ValueError as exc:
+            raise ValueError("unsupported review decision") from exc
+        if decision not in {
+            ReviewDecision.APPROVE,
+            ReviewDecision.REJECT,
+            ReviewDecision.RETURN_FOR_CHANGES,
+        }:
+            raise ValueError("unsupported review decision")
+        visible_ids = {
+            item.id
+            for scope_type, scope_value in context.data_scopes
+            for item in review.list_submissions_for_scope(scope_type, scope_value)
+        }
+        if submission_id not in visible_ids:
+            from novel_platform.modules.agent.application import PermissionDenied
+
+            raise PermissionDenied("review submission is outside the staff data scope")
+        record = review.decide(submission_id, context.actor_id, decision, actor_type="human")
+        return {
+            "id": record.id,
+            "submission_id": record.submission_id,
+            "decision": record.decision.value,
+            "execution_channel": "AGENT",
+        }
+
+    agent_gateway.register(
+        ToolResource(
+            name="review.decide",
+            description="Record an assigned review decision through ReviewService",
+            permission="review.decide",
+            read_only=False,
+            input_schema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["submission_id", "decision"],
+                "properties": {
+                    "submission_id": {"type": "string", "minLength": 1},
+                    "decision": {
+                        "type": "string",
+                        "enum": ["APPROVE", "REJECT", "RETURN_FOR_CHANGES"],
+                    },
+                },
+            },
+        ),
+        decide_review_from_agent,
+    )
+    agent_gateway.register(
+        ToolResource(
+            name="support.dashboard",
+            description="Read support dashboard metrics in the current staff scope",
+            permission="support.read",
+            input_schema={"type": "object", "additionalProperties": False},
+        ),
+        lambda _arguments: admin_center.support_dashboard(),
+    )
     copyright_service = SqlCopyrightService(engine) if engine is not None else CopyrightService()
     app.state.copyright_service = copyright_service
     legal = SqlLegalService(engine) if engine is not None else LegalService()
@@ -367,6 +550,8 @@ def create_app() -> FastAPI:
     app.state.reader_experience_service = reader_experience
     governance = SqlGovernanceService(engine) if engine is not None else GovernanceService()
     app.state.governance_service = governance
+    commerce.record_payment_credit_failure = governance.record_payment_credit_failure
+    governance.repair_payment_credit = commerce.repair_payment_credit
 
     delivery_table = None
     if engine is not None and getattr(engine, "dialect", None) is not None:
@@ -405,9 +590,19 @@ def create_app() -> FastAPI:
         "PayoutSucceeded",
         "PayoutStatusChanged",
     )
+    search_projection_handler = SearchProjectionHandler(search_projection)
+
+    def deliver_search_event(event: OutboxEvent) -> None:
+        search_projection_handler(event)
+        deliver_outbox_event(event)
+
     outbox_worker = OutboxWorker(
         governance,
-        {event_type: deliver_outbox_event for event_type in outbox_event_types},
+        {
+            **{event_type: deliver_outbox_event for event_type in outbox_event_types},
+            "BOOK_INDEX": deliver_search_event,
+            "BOOK_TAKEN_DOWN": deliver_search_event,
+        },
         worker_id=settings.outbox_worker_id,
     )
     app.state.outbox_worker = outbox_worker
@@ -416,6 +611,7 @@ def create_app() -> FastAPI:
     async def outbox_pump() -> None:
         while True:
             try:
+                await asyncio.to_thread(governance.auto_repair_payment_credits, limit=50)
                 await asyncio.to_thread(outbox_worker.run_once, limit=50)
             except Exception:
                 logger.exception("outbox worker iteration failed")
@@ -432,6 +628,7 @@ def create_app() -> FastAPI:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            app.state.agent_runner.close_all()
 
     app.router.lifespan_context = lifespan
 
@@ -447,6 +644,28 @@ def create_app() -> FastAPI:
         prefix="/admin/api/v1",
     )
     app.include_router(build_staff_auth_router(staff_auth))
+    app.include_router(
+        build_agent_admin_router(
+            agent_audit_sink,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
+    app.include_router(
+        build_agent_gateway_router(
+            agent_gateway,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
+    app.include_router(
+        build_agent_runtime_router(
+            agent_gateway,
+            app.state.agent_runner,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
     for router in build_content_routers(
         content,
         auth_required=True,
@@ -460,10 +679,13 @@ def create_app() -> FastAPI:
         auth_required=True,
         account_for_author=author.account_id_for_profile,
         staff_scopes=platform.repository.scopes_for,
+        authorize_staff=staff_auth.authorize,
     ):
         app.include_router(router)
-    app.include_router(build_reading_router(reading, auth_required=True))
-    app.include_router(build_library_router(library, auth_required=True), prefix="/api/v1")
+    app.include_router(build_reading_router(reading, auth_required=True, content=content))
+    app.include_router(
+        build_library_router(library, auth_required=True, content=content), prefix="/api/v1"
+    )
     app.include_router(build_search_router(search))
     app.include_router(
         build_wallet_router(
@@ -489,32 +711,81 @@ def create_app() -> FastAPI:
     app.include_router(
         build_support_router(support, auth_required=True, authorize_staff=staff_auth.authorize)
     )
-    app.include_router(build_risk_router(risk))
-    app.include_router(build_approval_router(approvals, auth_required=True))
+    app.include_router(
+        build_risk_router(risk, auth_required=True, authorize_staff=staff_auth.authorize)
+    )
+    app.include_router(
+        build_approval_router(
+            approvals,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
     for router in build_author_finance_router(
         author_finance,
         auth_required=True,
         account_for_author=author.account_id_for_profile,
+        author_for_book=lambda book_id: content.get_book(book_id).author_id,
         is_real_named=identity.is_real_named,
         authorize_staff=staff_auth.authorize,
     ):
         app.include_router(router)
-    app.include_router(build_payout_callback_router(author_finance))
+    app.include_router(
+        build_payout_callback_router(
+            author_finance,
+            auth_required=True,
+            callback_max_skew_seconds=settings.payment_callback_max_skew_seconds,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
     for router in build_author_center_router(
         author_center,
         auth_required=True,
         account_for_author=author.account_id_for_profile,
+        author_for_book=lambda book_id: content.get_book(book_id).author_id,
+        chapter_for_book=content.get_chapter_for_book,
+        authorize_staff=staff_auth.authorize,
     ):
         app.include_router(router)
-    app.include_router(build_admin_center_router(admin_center))
-    app.include_router(build_operation_router(operation))
+    app.include_router(
+        build_admin_center_router(
+            admin_center,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
+    app.include_router(
+        build_operation_router(
+            operation,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
     app.include_router(build_reader_operation_router(operation))
-    app.include_router(build_copyright_router(copyright_service))
-    app.include_router(build_legal_router(legal))
+    app.include_router(
+        build_copyright_router(
+            copyright_service,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
+    app.include_router(
+        build_legal_router(
+            legal,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
     app.include_router(
         build_reader_experience_router(content, reader_experience, auth_required=True)
     )
-    app.include_router(build_governance_router(governance, auth_required=True))
+    app.include_router(
+        build_governance_router(
+            governance,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
     return app
 
 

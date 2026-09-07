@@ -1,3 +1,4 @@
+import inspect
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
@@ -20,9 +21,41 @@ class AgentAuditSink(Protocol):
 
     def reload(self) -> tuple[AgentAudit, ...]: ...
 
+    def query(
+        self,
+        *,
+        actor_id: str | None = None,
+        tool_name: str | None = None,
+        outcome: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[tuple[AgentAudit, ...], int]: ...
+
 
 class AgentAuditRecorder(Protocol):
     def record(self, audit: AgentAudit) -> None: ...
+
+
+class AgentExecutionContext:
+    """Server-owned identity and authorization context passed to adapters."""
+
+    def __init__(
+        self,
+        *,
+        actor_id: str,
+        session_id: str | None,
+        request_id: str | None,
+        permissions: tuple[str, ...] = (),
+        data_scopes: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        self.actor_id = actor_id
+        self.session_id = session_id
+        self.request_id = request_id
+        self.permissions = permissions
+        self.data_scopes = data_scopes
+
+
+AgentCallback = Callable[..., Any]
 
 
 class AgentError(Exception):
@@ -62,6 +95,27 @@ class InMemoryAgentAuditLog:
     def reload(self) -> tuple[AgentAudit, ...]:
         return self.records
 
+    def query(
+        self,
+        *,
+        actor_id: str | None = None,
+        tool_name: str | None = None,
+        outcome: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[tuple[AgentAudit, ...], int]:
+        if page < 1 or page_size < 1:
+            raise ValueError("page and page_size must be positive")
+        records = tuple(
+            audit
+            for audit in self._records
+            if (actor_id is None or audit.actor_id == actor_id)
+            and (tool_name is None or audit.tool_name == tool_name)
+            and (outcome is None or audit.outcome == outcome)
+        )
+        start = (page - 1) * page_size
+        return records[start : start + page_size], len(records)
+
 
 class AgentGateway:
     def __init__(
@@ -75,9 +129,13 @@ class AgentGateway:
             raise ValueError("provide either audit_recorder or audit_sink")
         self._permission_checker = permission_checker
         self.audit_recorder = audit_sink or audit_recorder or InMemoryAgentAuditLog()
-        self._tools: dict[str, tuple[ToolResource, Callable[[dict[str, Any]], Any]]] = {}
+        self._tools: dict[str, tuple[ToolResource, AgentCallback]] = {}
 
-    def register(self, resource: ToolResource, callback: Callable[[dict[str, Any]], Any]) -> None:
+    @property
+    def permission_checker(self) -> AgentPermissionChecker:
+        return self._permission_checker
+
+    def register(self, resource: ToolResource, callback: AgentCallback) -> None:
         if resource.name in self._tools:
             raise ValueError("tool resource already registered")
         self._tools[resource.name] = (resource, callback)
@@ -85,7 +143,19 @@ class AgentGateway:
     def resources(self) -> tuple[ToolResource, ...]:
         return tuple(resource for resource, _ in self._tools.values())
 
-    def execute(self, call: AgentToolCall) -> AgentToolResult:
+    def resources_for(self, actor_id: str) -> tuple[ToolResource, ...]:
+        return tuple(
+            resource
+            for resource, _ in self._tools.values()
+            if self._permission_checker.has_permission(actor_id, resource.permission)
+        )
+
+    def execute(
+        self,
+        call: AgentToolCall,
+        *,
+        context: AgentExecutionContext | None = None,
+    ) -> AgentToolResult:
         registered = self._tools.get(call.tool_name)
         if registered is None:
             self._audit(call, "", "DENIED", "tool_not_found")
@@ -102,27 +172,18 @@ class AgentGateway:
             )
             raise PermissionDenied("agent actor lacks tool permission")
 
-        if not resource.read_only:
-            if (resource.high_risk or resource.requires_confirmation) and not call.confirmation:
-                self._audit(
-                    call,
-                    resource.permission,
-                    "REJECTED",
-                    "confirmation_required",
-                    risk_level="HIGH" if resource.high_risk else "LOW",
-                )
-                raise ConfirmationRequired("confirmation is required for high-risk writes")
+        if not resource.read_only and (resource.high_risk or resource.requires_confirmation):
             self._audit(
                 call,
                 resource.permission,
                 "REJECTED",
-                "write_tools_not_supported",
+                "confirmation_required",
                 risk_level="HIGH" if resource.high_risk else "LOW",
             )
-            raise WriteToolRejected("Agent cannot execute write tools")
+            raise ConfirmationRequired("a verified human confirmation is required for this write")
 
         try:
-            data = callback(call.arguments)
+            data = _invoke_callback(callback, call.arguments, context)
         except Exception:
             self._audit(
                 call,
@@ -167,6 +228,7 @@ class AgentGateway:
             result_summary=result_summary,
             ip=call.ip,
             device_id=call.device_id,
+            request_id=getattr(call, "request_id", None),
             confirmed=call.confirmation,
             risk_level=risk_level,
         )
@@ -177,10 +239,26 @@ class AgentGateway:
             cast(AgentAuditRecorder, self.audit_recorder).record(audit)
 
 
+def _invoke_callback(
+    callback: AgentCallback,
+    arguments: dict[str, Any],
+    context: AgentExecutionContext | None,
+) -> Any:
+    """Keep one-argument callbacks compatible while enabling context-aware adapters."""
+    if context is not None:
+        try:
+            if len(inspect.signature(callback).parameters) >= 2:
+                return callback(arguments, context)
+        except TypeError, ValueError:
+            pass
+    return callback(arguments)
+
+
 __all__ = [
     "AgentAuditRecorder",
     "AgentAuditSink",
     "AgentError",
+    "AgentExecutionContext",
     "AgentGateway",
     "AgentPermissionChecker",
     "ConfirmationRequired",

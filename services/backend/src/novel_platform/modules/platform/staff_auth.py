@@ -435,7 +435,8 @@ class StaffLoginRequest(BaseModel):
 
     employee_code: str = Field(min_length=1)
     password: str = Field(min_length=1)
-    otp: str | None = Field(default=None, pattern=r"^\d{6}$")
+    # TOTP is six digits; recovery codes are one-time hexadecimal strings.
+    otp: str | None = Field(default=None, min_length=6, max_length=64, pattern=r"^[A-Za-z0-9]+$")
 
 
 class StaffSessionResponse(BaseModel):

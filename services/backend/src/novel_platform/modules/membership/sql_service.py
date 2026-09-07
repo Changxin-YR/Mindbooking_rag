@@ -23,6 +23,7 @@ from novel_platform.modules.membership.domain import (
     TicketType,
     UserGrowthProfile,
 )
+from novel_platform.modules.payment import PaymentProvider, ProviderEvent, ProviderStatus
 
 
 def _id(prefix: str) -> str:
@@ -36,9 +37,17 @@ def _utc(value: datetime) -> datetime:
 class SqlMembershipService:
     """Persistent membership service; asset debits are supplied by an application port."""
 
-    def __init__(self, engine: Engine, is_real_named: Callable[[str], bool] | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        is_real_named: Callable[[str], bool] | None = None,
+        payment_provider: PaymentProvider | None = None,
+        payment_provider_secret: str = "",
+    ) -> None:
         self.engine = engine
         self._is_real_named = is_real_named
+        self.payment_provider = payment_provider
+        self.payment_provider_secret = payment_provider_secret
         self._metadata = sa.MetaData()
         self._tables: dict[str, Any] = {}
 
@@ -121,7 +130,7 @@ class SqlMembershipService:
                     or existing["channel"] != channel
                 ):
                     raise ValueError("IDEMPOTENCY_KEY_CONFLICT")
-                return self._membership_order_from_row(existing)
+                return self._with_provider_checkout(self._membership_order_from_row(existing))
             plan = (
                 connection.execute(
                     sa.select(plans)
@@ -174,7 +183,41 @@ class SqlMembershipService:
                     created_at=datetime.now(UTC),
                 )
             )
+            return self._with_provider_checkout(order)
+
+    def payment_details(self, payment_no: str) -> tuple[str, int]:
+        payments = self._table("payment_orders")
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    sa.select(payments.c.account_id, payments.c.paid_cents).where(
+                        payments.c.payment_no == payment_no
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise ValueError("PAYMENT_NOT_FOUND")
+        return str(row["account_id"]), int(row["paid_cents"])
+
+    def _with_provider_checkout(self, order: MembershipOrder) -> MembershipOrder:
+        provider = self.payment_provider
+        if provider is None:
             return order
+        checkout = provider.create_checkout(order.payment_no, order.price_cents, currency="CNY")
+        return MembershipOrder(
+            order.id,
+            order.payment_no,
+            order.account_id,
+            order.plan_code,
+            order.plan_version,
+            order.channel,
+            order.price_cents,
+            order.status,
+            provider=checkout.provider,
+            checkout_url=checkout.checkout_url,
+        )
 
     def handle_payment_callback(self, provider: str, event_id: str, payment_no: str) -> str:
         if not provider.strip() or not event_id.strip() or not payment_no.strip():
@@ -254,15 +297,167 @@ class SqlMembershipService:
             )
             return str(order["id"])
 
+    def handle_payment_provider_event(
+        self, event: ProviderEvent, *, now: datetime | None = None
+    ) -> str:
+        """Verify a sandbox/real provider event before changing membership facts."""
+        provider = self.payment_provider
+        secret = self.payment_provider_secret
+        if provider is None or not secret:
+            raise ValueError("MEMBERSHIP_PAYMENT_PROVIDER_NOT_CONFIGURED")
+        if event.event_type != "PAYMENT":
+            raise ValueError("MEMBERSHIP_PAYMENT_EVENT_TYPE_INVALID")
+        if event.provider != getattr(provider, "provider_name", event.provider):
+            raise ValueError("MEMBERSHIP_PAYMENT_PROVIDER_MISMATCH")
+        if not event.verify_signature(secret):
+            raise ValueError("MEMBERSHIP_PAYMENT_SIGNATURE_INVALID")
+        if _utc(event.available_at) > _utc(now or datetime.now(UTC)):
+            raise ValueError("MEMBERSHIP_PAYMENT_EVENT_NOT_AVAILABLE")
+        orders = self._table("membership_orders")
+        payments = self._table("payment_orders")
+        events = self._table("payment_channel_events")
+        # Reflect every table before opening the SQLite transaction.  SQLite's
+        # in-memory pool can otherwise use a second connection during lazy
+        # reflection, hiding the membership row from the committing connection.
+        for table_name in (
+            "membership_plan_versions",
+            "membership_accounts",
+            "ticket_lots",
+            "ticket_transactions",
+            "ticket_accounts",
+        ):
+            self._table(table_name)
+        with self.engine.begin() as connection:
+            existing_event = (
+                connection.execute(
+                    sa.select(events).where(
+                        events.c.provider == event.provider,
+                        events.c.provider_event_id == event.event_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            order = (
+                connection.execute(
+                    sa.select(orders)
+                    .where(orders.c.payment_no == event.reference_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            payment = (
+                connection.execute(
+                    sa.select(payments)
+                    .where(payments.c.payment_no == event.reference_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if order is None or payment is None:
+                raise ValueError("MEMBERSHIP_ORDER_NOT_FOUND")
+            if int(payment["paid_cents"]) != event.amount_cents or event.currency != "CNY":
+                raise ValueError("MEMBERSHIP_PAYMENT_AMOUNT_MISMATCH")
+            if existing_event is not None:
+                if existing_event["payment_no"] != event.reference_id:
+                    raise ValueError("PAYMENT_EVENT_CONFLICT")
+                return str(order["id"])
+            existing_transaction = (
+                connection.execute(
+                    sa.select(events.c.payment_no).where(
+                        events.c.provider == event.provider,
+                        events.c.channel_transaction_id == event.provider_transaction_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                existing_transaction is not None
+                and existing_transaction["payment_no"] != event.reference_id
+            ):
+                raise ValueError("PAYMENT_TRANSACTION_CONFLICT")
+            self._record_payment_event(
+                events,
+                connection,
+                event.provider,
+                event.event_id,
+                event.reference_id,
+                event.provider_transaction_id,
+            )
+            if event.status is ProviderStatus.SUCCESS:
+                if payment["status"] == "PAID" and order["status"] == "PAID":
+                    return str(order["id"])
+                if payment["status"] not in ("PENDING", "PROCESSING") or order["status"] not in (
+                    "PENDING_PAYMENT",
+                    "PROCESSING",
+                ):
+                    raise ValueError("PAYMENT_STATE_CONFLICT")
+                plan = (
+                    connection.execute(
+                        sa.select(self._table("membership_plan_versions")).where(
+                            self._table("membership_plan_versions").c.plan_code
+                            == order["plan_code"],
+                            self._table("membership_plan_versions").c.version
+                            == order["plan_version"],
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if plan is None:
+                    raise ValueError("MEMBERSHIP_PLAN_NOT_FOUND")
+                self._activate_order(connection, order, plan)
+                connection.execute(
+                    payments.update().where(payments.c.id == payment["id"]).values(status="PAID")
+                )
+                connection.execute(
+                    orders.update().where(orders.c.id == order["id"]).values(status="PAID")
+                )
+                return str(order["id"])
+            status = event.status.value
+            if payment["status"] not in ("PENDING", "PROCESSING"):
+                if payment["status"] == status:
+                    return str(order["id"])
+                raise ValueError("PAYMENT_STATE_CONFLICT")
+            connection.execute(
+                payments.update().where(payments.c.id == payment["id"]).values(status=status)
+            )
+            connection.execute(
+                orders.update().where(orders.c.id == order["id"]).values(status=status)
+            )
+            return str(order["id"])
+
     def _record_payment_event(
-        self, events: Any, connection: Connection, provider: str, event_id: str, payment_no: str
+        self,
+        events: Any,
+        connection: Connection,
+        provider: str,
+        event_id: str,
+        payment_no: str,
+        provider_transaction_id: str | None = None,
     ) -> None:
+        if provider_transaction_id:
+            existing_transaction = (
+                connection.execute(
+                    sa.select(events.c.payment_no).where(
+                        events.c.provider == provider,
+                        events.c.channel_transaction_id == provider_transaction_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing_transaction is not None:
+                return
         connection.execute(
             events.insert().values(
                 provider=provider,
                 provider_event_id=event_id,
                 payment_no=payment_no,
-                channel_transaction_id=None,
+                channel_transaction_id=provider_transaction_id,
                 created_at=datetime.now(UTC),
             )
         )
@@ -470,7 +665,7 @@ class SqlMembershipService:
             return AccessMode.VIP_REQUIRED
         accounts = self._table("membership_accounts")
         library = self._table("membership_library_entries")
-        at = now or datetime.now(UTC)
+        at = _utc(now or datetime.now(UTC))
         with self.engine.connect() as connection:
             row = connection.execute(
                 sa.select(accounts.c.expires_at)

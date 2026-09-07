@@ -51,6 +51,11 @@ export function buildRequestHeaders(token: string, init?: HeadersInit): Headers 
   return headers
 }
 
+export function isHttpStatus(error: unknown, status: number): boolean {
+  if (!error || typeof error !== 'object' || !('status' in error)) return false
+  return (error as { status?: unknown }).status === status
+}
+
 export function resolveApiBaseUrl(configured = '', fallback = ''): string {
   return (configured.trim() || fallback.trim()).replace(/\/+$/, '')
 }

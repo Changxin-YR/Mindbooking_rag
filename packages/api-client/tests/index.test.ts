@@ -39,4 +39,12 @@ describe('api client', () => {
 
     await expect(client.put('/wallet', { amount: 1 }, { idempotencyKey: 'request-1' })).resolves.toEqual({ ok: true })
   })
+
+  it('returns an ApiError for non-JSON failures and preserves the request id', async () => {
+    const client = createApiClient({
+      fetcher: async () => new Response('upstream unavailable', { status: 503, headers: { 'X-Request-ID': 'REQ-503' } }),
+    })
+
+    await expect(client.get('/health')).rejects.toEqual(new ApiError(503, 'HTTP_ERROR', 'Request failed with status 503', 'REQ-503'))
+  })
 })

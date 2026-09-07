@@ -1,3 +1,3 @@
 import { defineConfig } from 'vite'
 
-export default defineConfig({ base: '/admin/' })
+export default defineConfig({ base: process.env.VITE_APP_BASE || '/admin/' })

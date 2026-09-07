@@ -1,13 +1,22 @@
 from novel_platform.modules.agent.api import (
     AgentAudit,
+    AgentAuditPageResponse,
+    AgentAuditResponse,
+    AgentChatRequest,
+    AgentChatResponse,
+    AgentHarnessUrlResponse,
     AgentToolCall,
     AgentToolResult,
     ToolResource,
+    build_agent_admin_router,
+    build_agent_gateway_router,
+    build_agent_runtime_router,
 )
 from novel_platform.modules.agent.application import (
     AgentAuditRecorder,
     AgentAuditSink,
     AgentError,
+    AgentExecutionContext,
     AgentGateway,
     AgentPermissionChecker,
     ConfirmationRequired,
@@ -19,10 +28,16 @@ from novel_platform.modules.agent.application import (
 
 __all__ = [
     "AgentAudit",
+    "AgentAuditPageResponse",
     "AgentAuditRecorder",
+    "AgentAuditResponse",
     "AgentAuditSink",
+    "AgentChatRequest",
+    "AgentChatResponse",
     "AgentError",
+    "AgentExecutionContext",
     "AgentGateway",
+    "AgentHarnessUrlResponse",
     "AgentPermissionChecker",
     "AgentToolCall",
     "AgentToolResult",
@@ -32,4 +47,7 @@ __all__ = [
     "ToolNotFound",
     "ToolResource",
     "WriteToolRejected",
+    "build_agent_admin_router",
+    "build_agent_gateway_router",
+    "build_agent_runtime_router",
 ]

@@ -2,18 +2,47 @@ openapi: 3.0.3
 info:
   title: Author Finance API
   version: v1.2
+  description: >-
+    Staging supports the versioned virtual contract policy
+    SANDBOX_CN_2026_V1. It is not a production tax or legal policy.
 paths:
   /writer/api/v1/finance/contracts:
     post:
       operationId: create_contract
       responses: {'201': {description: Contract created}}
+  /writer/api/v1/finance/contracts/{contract_id}:
+    get:
+      operationId: get_contract
+      description: Returns the generated versioned sandbox contract document for its owning author.
+      responses: {'200': {description: Contract document}, '404': {description: Contract not found}}
+  /writer/api/v1/finance/contracts/{contract_id}/sign:
+    post:
+      operationId: sign_contract
+      description: Owning author signs the generated sandbox contract; repeated signing by the same author is idempotent.
+      responses: {'200': {description: Contract signed}, '409': {description: Signature conflict}}
+  /admin/api/v1/finance/contracts:
+    get:
+      operationId: list_finance_contracts
+      description: >-
+        Staff finance.read contract inbox. Optional `author_id` and `status`
+        filters return the generated virtual contract documents newest first.
+      responses: {'200': {description: Contract inbox}, '422': {description: Invalid filter}}
   /admin/api/v1/finance/contracts/{contract_id}/approve:
     post:
       operationId: approve_contract
       responses: {'200': {description: Contract approved}, '409': {description: Maker checker failure}}
+  /admin/api/v1/finance/contracts/{contract_id}/activate:
+    post:
+      operationId: activate_contract
+      description: Activates a signed virtual contract after finance approval; requires the owning author's persisted signature.
+      responses: {'200': {description: Contract activated}, '409': {description: Contract is unsigned or activation conflicts}}
   /admin/api/v1/finance/revenue:
     post:
       operationId: record_revenue
+      description: >-
+        Records an idempotent revenue fact. `share_bps` is optional when an
+        active virtual contract exists; `book_id` selects the contract for
+        authors with multiple active works.
       responses: {'201': {description: Revenue recorded}}
   /admin/api/v1/finance/settlements:
     post:
@@ -27,3 +56,65 @@ paths:
     post:
       operationId: create_chargeback
       responses: {'201': {description: Chargeback traced to revenue}}
+  /api/v1/payouts/sandbox/simulate:
+    post:
+      operationId: simulate_sandbox_payout
+      description: Staff-only deterministic callback simulation for staging.
+      responses: {'200': {description: Callback accepted}, '503': {description: Sandbox adapter unavailable}}
+
+components:
+  schemas:
+    ContractResponse:
+      type: object
+      required: [id, author_id, book_id, status, policy_version, document_text, document_hash]
+      properties:
+        id: {type: string}
+        author_id: {type: string}
+        book_id: {type: string}
+        status: {type: string}
+        policy_version: {type: string}
+        document_text: {type: string}
+        document_hash: {type: string, minLength: 64, maxLength: 64}
+        signed_by: {type: string, nullable: true}
+        signed_at: {type: string, format: date-time, nullable: true}
+        signature_hash: {type: string, nullable: true, minLength: 64, maxLength: 64}
+    RevenueResponse:
+      type: object
+      required: [id, author_id, source, source_ref, gross_cents, author_cents, status, tax_cents, net_author_cents]
+      properties:
+        id: {type: string}
+        author_id: {type: string}
+        source: {type: string}
+        source_ref: {type: string}
+        gross_cents: {type: integer, format: int64}
+        author_cents: {type: integer, format: int64}
+        tax_cents: {type: integer, format: int64}
+        net_author_cents: {type: integer, format: int64}
+        policy_version: {type: string, nullable: true}
+        status: {type: string}
+    SettlementResponse:
+      type: object
+      required: [id, author_id, period, amount_cents, status, withdrawn_cents, gross_cents, tax_cents]
+      properties:
+        id: {type: string}
+        author_id: {type: string}
+        period: {type: string, pattern: '^\\d{4}-(0[1-9]|1[0-2])$'}
+        amount_cents: {type: integer, format: int64}
+        gross_cents: {type: integer, format: int64}
+        tax_cents: {type: integer, format: int64}
+        status: {type: string}
+        withdrawn_cents: {type: integer, format: int64}
+    PayoutResponse:
+      type: object
+      required: [id, withdrawal_id, payout_no, provider, amount_cents, currency, destination, status]
+      properties:
+        id: {type: string}
+        withdrawal_id: {type: string}
+        payout_no: {type: string}
+        provider: {type: string}
+        amount_cents: {type: integer, format: int64}
+        currency: {type: string}
+        destination: {type: string}
+        status: {type: string}
+        provider_event_id: {type: string, nullable: true}
+        provider_transaction_id: {type: string, nullable: true}

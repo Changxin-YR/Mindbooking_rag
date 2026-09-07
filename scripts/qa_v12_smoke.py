@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import gettempdir
 from time import monotonic, sleep, time
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 
@@ -16,7 +17,7 @@ def wait_for_backend(api, timeout_seconds: float = 90) -> None:
             last_status = str(response.status)
             if response.ok:
                 return
-        except Exception as exc:
+        except (OSError, PlaywrightError) as exc:
             last_status = str(exc)
         sleep(0.5)
     raise AssertionError(f"backend did not become ready: {last_status}")
@@ -90,11 +91,8 @@ def main() -> None:
             data={"fixed_version_ids": [version.json()["id"]]},
         )
         assert submission.ok, submission.text()
-        staff_code = os.environ.get("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "")
-        staff_password = os.environ.get("STAFF_BOOTSTRAP_PASSWORD", "")
-        assert staff_code and staff_password, (
-            "set STAFF_BOOTSTRAP_EMPLOYEE_CODE and STAFF_BOOTSTRAP_PASSWORD for admin smoke"
-        )
+        staff_code = os.environ.get("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "qa-admin")
+        staff_password = os.environ.get("STAFF_BOOTSTRAP_PASSWORD", "QaAdmin#123456")
         staff_login = api.post(
             "/admin/api/v1/auth/staff/sessions",
             data={"employee_code": staff_code, "password": staff_password},
@@ -110,6 +108,13 @@ def main() -> None:
         )
         assert decision.ok
         try:
+            guest = browser.new_page()
+            guest.goto(web_base_url, wait_until="networkidle")
+            guest.get_by_role("link", name="登录", exact=True).click()
+            guest.wait_for_url("**/settings")
+            guest.get_by_label("手机号").wait_for(timeout=5000)
+            guest.close()
+
             page = browser.new_page()
             page.add_init_script(
                 "localStorage.setItem('reader-web-session', "

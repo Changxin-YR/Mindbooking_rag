@@ -1,9 +1,14 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from novel_platform.modules.payment.provider import (
     ProviderStatus,
     SandboxPaymentProvider,
     SandboxPayoutProvider,
+    build_payment_provider,
+    build_payout_provider,
+    validate_event_freshness,
 )
 
 
@@ -32,6 +37,20 @@ def test_payment_provider_default_event_ids_are_unique_across_provider_instances
     assert (
         first.generate_callback_event("PAY-INSTANCE-1").event_id
         != second.generate_callback_event("PAY-INSTANCE-2").event_id
+    )
+
+
+def test_payment_provider_default_event_ids_are_unique_for_same_reference_across_instances() -> (
+    None
+):
+    first = SandboxPaymentProvider(secret="sandbox-secret")
+    second = SandboxPaymentProvider(secret="sandbox-secret")
+    first.create_checkout("PAY-SAME", amount_cents=1_000)
+    second.create_checkout("PAY-SAME", amount_cents=1_000)
+
+    assert (
+        first.generate_callback_event("PAY-SAME").event_id
+        != second.generate_callback_event("PAY-SAME").event_id
     )
 
 
@@ -67,6 +86,34 @@ def test_payment_provider_can_emit_duplicate_and_delayed_callbacks() -> None:
     assert events[0].available_at - events[0].occurred_at == timedelta(seconds=30)
 
 
+def test_provider_event_freshness_rejects_future_and_stale_events() -> None:
+    provider = SandboxPaymentProvider(
+        secret="secret", clock=lambda: datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
+    )
+    provider.create_checkout("PAY-FRESH-1", 100)
+    event = provider.generate_callback_event("PAY-FRESH-1")
+
+    with pytest.raises(ValueError, match="PROVIDER_EVENT_FUTURE"):
+        validate_event_freshness(
+            event, max_skew_seconds=300, now=event.occurred_at - timedelta(minutes=6)
+        )
+
+    with pytest.raises(ValueError, match="PROVIDER_EVENT_STALE"):
+        validate_event_freshness(
+            event, max_skew_seconds=300, now=event.occurred_at + timedelta(minutes=6)
+        )
+
+
+def test_provider_event_freshness_allows_sandbox_delay_within_window() -> None:
+    provider = SandboxPaymentProvider(
+        secret="secret", clock=lambda: datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
+    )
+    provider.create_checkout("PAY-FRESH-2", 100)
+    event = provider.generate_callback_event("PAY-FRESH-2", delay_seconds=120)
+
+    assert validate_event_freshness(event, max_skew_seconds=300, now=event.available_at) is None
+
+
 def test_payout_provider_emits_standardized_signed_event() -> None:
     provider = SandboxPayoutProvider(secret="sandbox-secret")
 
@@ -80,3 +127,28 @@ def test_payout_provider_emits_standardized_signed_event() -> None:
     assert event.event_type == "PAYOUT"
     assert event.status is ProviderStatus.REJECTED
     assert event.verify_signature("sandbox-secret")
+
+
+def test_named_sandbox_providers_keep_channel_identity_and_aliases() -> None:
+    alipay = build_payment_provider("SANDBOX_ALIPAY", "sandbox-secret")
+    wechat = build_payment_provider("SANDBOX_WECHAT", "sandbox-secret")
+    bank = build_payout_provider("SANDBOX_BANK", "sandbox-secret")
+    legacy_payment = build_payment_provider("SANDBOX", "sandbox-secret")
+    legacy_payout = build_payout_provider("SANDBOX_PAYOUT", "sandbox-secret")
+
+    alipay.create_checkout("PAY-ALIPAY", 100)
+    wechat.create_checkout("PAY-WECHAT", 100)
+    bank.create_payout("PO-BANK", 100, "CNY", "bank:test")
+
+    assert alipay.provider_name == "SANDBOX_ALIPAY"
+    assert wechat.provider_name == "SANDBOX_WECHAT"
+    assert bank.provider_name == "SANDBOX_BANK"
+    assert legacy_payment.provider_name == "SANDBOX"
+    assert legacy_payout.provider_name == "SANDBOX_PAYOUT"
+
+
+def test_provider_factory_fails_closed_for_unimplemented_external_channels() -> None:
+    with pytest.raises(ValueError, match="UNSUPPORTED_PAYMENT_PROVIDER"):
+        build_payment_provider("ALIPAY", "sandbox-secret")
+    with pytest.raises(ValueError, match="UNSUPPORTED_PAYOUT_PROVIDER"):
+        build_payout_provider("BANK", "sandbox-secret")

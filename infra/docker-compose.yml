@@ -111,15 +111,26 @@ services:
       dockerfile: infra/docker/backend.Dockerfile
     profiles: [apps]
     environment:
+      APP_ENV: ${APP_ENV:-staging}
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-novel}:${MYSQL_PASSWORD:-novel_dev_only}@mysql:3306/${MYSQL_DATABASE:-novel_platform}
       PERSISTENCE_MODE: sql
       OPENSEARCH_URL: http://opensearch:9200
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173}
       SESSION_SECRET: ${SESSION_SECRET:-development-only-session-secret}
       REAL_NAME_ENCRYPTION_KEY: ${REAL_NAME_ENCRYPTION_KEY:-development-only-real-name-encryption-key}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
-      STAFF_BOOTSTRAP_EMPLOYEE_CODE: ${STAFF_BOOTSTRAP_EMPLOYEE_CODE:-}
-      STAFF_BOOTSTRAP_PASSWORD: ${STAFF_BOOTSTRAP_PASSWORD:-}
+      PAYMENT_CALLBACK_SECRET: ${PAYMENT_CALLBACK_SECRET:-development-only-payment-callback-secret}
+      PAYMENT_CALLBACK_MAX_SKEW_SECONDS: ${PAYMENT_CALLBACK_MAX_SKEW_SECONDS:-300}
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-SANDBOX_ALIPAY}
+      PAYOUT_PROVIDER: ${PAYOUT_PROVIDER:-SANDBOX_BANK}
+      # Development/staging-only bootstrap. Production must provide its own secret values.
+      STAFF_BOOTSTRAP_EMPLOYEE_CODE: ${STAFF_BOOTSTRAP_EMPLOYEE_CODE:-qa-admin}
+      STAFF_BOOTSTRAP_PASSWORD: ${STAFF_BOOTSTRAP_PASSWORD:-QaAdmin#123456}
+      AGENT_BACKEND_URL: ${AGENT_BACKEND_URL:-http://backend:80}
+      DEEPSEEK_HARNESS_RUNTIME_MODE: ${DEEPSEEK_HARNESS_RUNTIME_MODE:-web}
+      DEEPSEEK_HARNESS_WEB_BRIDGE_URL: ${DEEPSEEK_HARNESS_WEB_BRIDGE_URL:-http://harness:8090}
+      DEEPSEEK_HARNESS_WEB_BRIDGE_SECRET: ${DEEPSEEK_HARNESS_WEB_BRIDGE_SECRET:-development-only-harness-bridge-secret}
+      DEEPSEEK_HARNESS_WEB_START_TIMEOUT_SECONDS: ${DEEPSEEK_HARNESS_WEB_START_TIMEOUT_SECONDS:-120}
     depends_on:
       mysql:
         condition: service_healthy
@@ -137,6 +148,9 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/reader.Dockerfile
+      args:
+        NUXT_PUBLIC_API_BASE_URL: ${NUXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NUXT_APP_BASE_URL: ${NUXT_APP_BASE_URL:-/}
     profiles: [apps]
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1/ || exit 1"]
@@ -148,6 +162,9 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/writer.Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+        VITE_APP_BASE: ${VITE_APP_BASE:-/writer/}
     profiles: [apps]
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1/ || exit 1"]
@@ -159,12 +176,49 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/admin.Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+        VITE_APP_BASE: ${VITE_ADMIN_APP_BASE:-/admin/}
     profiles: [apps]
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1/ || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
+
+  harness:
+    image: node:24-bookworm-slim
+    profiles: [apps]
+    working_dir: /harness
+    volumes:
+      - ${DEEPSEEK_HARNESS_REPO:-../../deepseek-harness-master}:/harness
+      - harness_node_modules:/harness/node_modules
+      - ../scripts/harness_web_host.mjs:/bridge/harness_web_host.mjs:ro
+      - harness_web_data:/harness-data
+    environment:
+      HARNESS_REPO: /harness
+      HARNESS_HOME_ROOT: /harness-data
+      HARNESS_BRIDGE_PORT: 8090
+      HARNESS_BRIDGE_SECRET: ${DEEPSEEK_HARNESS_WEB_BRIDGE_SECRET:-development-only-harness-bridge-secret}
+      HARNESS_BACKEND_URL: ${HARNESS_BACKEND_URL:-http://backend:80}
+      HARNESS_IDLE_TIMEOUT_SECONDS: ${HARNESS_IDLE_TIMEOUT_SECONDS:-300}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+      DEEPSEEK_PROVIDER: ${DEEPSEEK_PROVIDER:-deepseek-official}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      DSH_CLIENT_COMMIT_HASH: ${DEEPSEEK_HARNESS_COMMIT_HASH:-0000000}
+    command: >-
+      sh -lc "apt-get update && apt-get install -y --no-install-recommends git ca-certificates && corepack enable && if [ ! -f apps/web/dist/index.html ]; then pnpm install --frozen-lockfile && pnpm run build; fi && node /bridge/harness_web_host.mjs"
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${HARNESS_WEB_PORT_RANGE:-3080-3180}:3080-3180"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   nginx:
     image: nginx:1.27-alpine
@@ -195,3 +249,5 @@ volumes:
   opensearch_data:
   clickhouse_data:
   minio_data:
+  harness_node_modules:
+  harness_web_data:

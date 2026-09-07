@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildRequestHeaders,
+  isHttpStatus,
   loadSession,
   saveSession,
   resolveApiBaseUrl,
@@ -43,5 +44,11 @@ describe('writer session', () => {
     expect(loadSession(storage)).toBeNull()
     expect(resolveApiBaseUrl(' https://api.example.test/// ')).toBe('https://api.example.test')
     expect(resolveApiBaseUrl('', 'https://fallback.example.test/')).toBe('https://fallback.example.test')
+  })
+
+  it('recognizes API status errors without relying on legacy error messages', () => {
+    expect(isHttpStatus({ status: 401 }, 401)).toBe(true)
+    expect(isHttpStatus({ status: 409 }, 401)).toBe(false)
+    expect(isHttpStatus(new Error('HTTP 401'), 401)).toBe(false)
   })
 })

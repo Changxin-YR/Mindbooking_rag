@@ -73,6 +73,11 @@ class PrivateApiMiddleware(BaseHTTPMiddleware):
                                 staff_auth.authorize(claims, permission)
                             else:
                                 staff_auth.authorize(claims, permission, *scope)
+                            authorized_permissions: set[str] = getattr(
+                                request.state, "staff_authorized_permissions", set()
+                            )
+                            authorized_permissions.add(permission)
+                            request.state.staff_authorized_permissions = authorized_permissions
                         except HTTPException as exc:
                             return JSONResponse(
                                 status_code=exc.status_code,
@@ -101,12 +106,34 @@ class PrivateApiMiddleware(BaseHTTPMiddleware):
 
 
 def _admin_permission(path: str, method: str) -> str:
+    path = path.rstrip("/") or "/"
+    if path in {
+        "/admin/api/v1/author-tasks",
+        "/admin/api/v1/campaigns",
+        "/admin/api/v1/learning",
+        "/admin/api/v1/author-alerts",
+    }:
+        return "operation.write"
+    if path == "/admin/api/v1/review-rules":
+        return "governance.write" if method != "GET" else "review.read"
+    if path == "/admin/api/v1/reviewer-quality":
+        return "review.decide"
+    if path == "/admin/api/v1/user-360":
+        return "admin.access"
+    if path == "/admin/api/v1/agent/audits":
+        return "agent.audit.read"
+    if path.startswith("/admin/api/v1/support/tickets/") and path.endswith("/csat"):
+        return "support.write"
+    if path == "/admin/api/v1/support/dashboard":
+        return "support.read"
     if "/chapters/" in path and path.endswith("/commercial-policy"):
         return "commerce.write"
     if "/finance/withdrawals/" in path and path.endswith("/risk-approve"):
         return "risk.write"
     if "/finance/withdrawals/" in path and path.endswith("/finance-approve"):
         return "finance.write"
+    if "/finance/contracts/" in path and path.endswith(("/approve", "/activate")):
+        return "approval.write"
     if "/auth/staff/credentials" in path:
         return "platform.manage"
     if "/reviews" in path:
@@ -121,12 +148,20 @@ def _admin_permission(path: str, method: str) -> str:
         return "operation.write" if method != "GET" else "operation.read"
     if "/copyright" in path or "/legal" in path:
         return "legal.write"
+    if "/invoices" in path:
+        return "finance.write"
+    if path.startswith("/admin/api/v1/agent/audits"):
+        return "agent.audit.read"
+    if path.startswith("/admin/api/v1/agent"):
+        return "agent.execute"
     if "/support" in path:
         return "support.write" if method != "GET" else "support.read"
     if "/platform" in path:
         return "platform.manage"
-    if "/parameters" in path or "/reconciliation" in path or "/emergencies" in path:
+    if "/parameters" in path or "/emergencies" in path:
         return "governance.write"
+    if "/reconciliation" in path:
+        return "governance.write" if method != "GET" else "governance.read"
     if "/membership" in path or "/gifts" in path:
         return "governance.write"
     return "admin.access"
@@ -134,6 +169,7 @@ def _admin_permission(path: str, method: str) -> str:
 
 def _admin_scope(path: str) -> tuple[str, str] | None:
     """Extract a resource id for exact server-side ASSIGNED scope checks."""
+    path = path.rstrip("/") or "/"
     patterns = (
         r"/reviews/([^/]+)/",
         r"/approvals/([^/]+)/",
@@ -156,4 +192,11 @@ def _admin_scope(path: str) -> tuple[str, str] | None:
 
 
 def _admin_collection_is_scoped(path: str) -> bool:
-    return path == "/admin/api/v1/reviews"
+    return path in {
+        "/admin/api/v1/reviews",
+        "/admin/api/v1/agent/chat",
+        "/admin/api/v1/agent/harness-url",
+        "/admin/api/v1/agent/mcp",
+        "/admin/api/v1/agent/resources",
+        "/admin/api/v1/agent/tools/execute",
+    }

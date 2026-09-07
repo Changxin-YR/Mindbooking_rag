@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,6 +12,8 @@ from novel_platform.modules.membership.domain import (
     UserGrowthProfile,
 )
 from novel_platform.modules.membership.sql_service import SqlMembershipService
+from novel_platform.modules.payment import ProviderStatus, SandboxPaymentProvider
+from novel_platform.modules.payment.provider import ProviderEvent, _event_signature
 
 
 def _engine() -> sa.Engine:
@@ -382,3 +385,102 @@ def test_sql_membership_checkout_callback_activates_and_grants_configured_ticket
             connection.execute(sa.text("SELECT status FROM membership_orders")).scalar_one()
             == "PAID"
         )
+
+
+def test_sql_membership_provider_event_verifies_and_handles_non_success_statuses() -> None:
+    engine = _engine()
+    provider = SandboxPaymentProvider("membership-secret", provider_name="SANDBOX")
+    service = SqlMembershipService(engine)
+    service.payment_provider = provider
+    service.payment_provider_secret = "membership-secret"
+    service.create_plan(
+        "MONTHLY",
+        "月度会员",
+        30,
+        price_cents=999,
+        daily_recommend_tickets=2,
+        monthly_chapter_tickets=5,
+    )
+
+    failed_order = service.create_order("acct-failed", "MONTHLY", "SANDBOX", "membership-failed")
+    provider.create_checkout(failed_order.payment_no, failed_order.price_cents)
+    failed_event = provider.generate_callback_event(
+        failed_order.payment_no, ProviderStatus.CANCELLED
+    )
+    assert service.handle_payment_provider_event(failed_event) == failed_order.id
+    assert not service.is_active("acct-failed")
+    assert service.handle_payment_provider_event(failed_event) == failed_order.id
+
+    paid_order = service.create_order("acct-paid", "MONTHLY", "SANDBOX", "membership-paid")
+    checkout = provider.create_checkout(paid_order.payment_no, paid_order.price_cents)
+    assert checkout.provider == "SANDBOX"
+    paid_event = provider.generate_callback_event(paid_order.payment_no, ProviderStatus.SUCCESS)
+    assert service.handle_payment_provider_event(paid_event) == paid_order.id
+    assert service.is_active("acct-paid")
+
+
+def test_sql_membership_provider_processing_can_finish_with_success() -> None:
+    engine = _engine()
+    provider = SandboxPaymentProvider("membership-secret", provider_name="SANDBOX")
+    service = SqlMembershipService(engine)
+    service.payment_provider = provider
+    service.payment_provider_secret = "membership-secret"
+    service.create_plan(
+        "PROCESSING",
+        "处理中会员",
+        30,
+        price_cents=999,
+        daily_recommend_tickets=2,
+        monthly_chapter_tickets=5,
+    )
+
+    order = service.create_order("acct-processing", "PROCESSING", "SANDBOX", "processing-key")
+    provider.create_checkout(order.payment_no, order.price_cents)
+    processing = provider.generate_callback_event(order.payment_no, ProviderStatus.PROCESSING)
+    assert service.handle_payment_provider_event(processing) == order.id
+    success = provider.generate_callback_event(order.payment_no, ProviderStatus.SUCCESS)
+
+    assert service.handle_payment_provider_event(success) == order.id
+    assert service.is_active("acct-processing")
+
+
+def test_sql_membership_provider_transaction_conflict_and_duplicate_callback_are_idempotent() -> (
+    None
+):
+    engine = _engine()
+    provider = SandboxPaymentProvider("membership-secret", provider_name="SANDBOX")
+    service = SqlMembershipService(engine)
+    service.payment_provider = provider
+    service.payment_provider_secret = "membership-secret"
+    service.create_plan(
+        "MONTHLY",
+        "月度会员",
+        30,
+        price_cents=999,
+        daily_recommend_tickets=2,
+        monthly_chapter_tickets=5,
+    )
+
+    first = service.create_order("acct-first", "MONTHLY", "SANDBOX", "membership-first")
+    second = service.create_order("acct-second", "MONTHLY", "SANDBOX", "membership-second")
+    provider.create_checkout(first.payment_no, first.price_cents)
+    provider.create_checkout(second.payment_no, second.price_cents)
+    first_event = provider.generate_callback_event(first.payment_no, ProviderStatus.SUCCESS)
+
+    assert service.handle_payment_provider_event(first_event) == first.id
+    balance = service.ticket_balance("acct-first")
+    assert service.handle_payment_provider_event(first_event) == first.id
+    assert service.ticket_balance("acct-first") == balance
+
+    second_event = provider.generate_callback_event(second.payment_no, ProviderStatus.SUCCESS)
+    unsigned = replace(
+        second_event,
+        provider_transaction_id=first_event.provider_transaction_id,
+        signature="",
+    )
+    conflicting_event: ProviderEvent = replace(
+        unsigned,
+        signature=_event_signature("membership-secret", unsigned),
+    )
+    with pytest.raises(ValueError, match="PAYMENT_TRANSACTION_CONFLICT"):
+        service.handle_payment_provider_event(conflicting_event)

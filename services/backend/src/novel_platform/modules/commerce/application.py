@@ -13,6 +13,10 @@ from novel_platform.modules.payment import Checkout, PaymentProvider, ProviderEv
 from novel_platform.modules.wallet.domain import LotAllocation, WalletPort, require_positive_int
 
 
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 @dataclass(frozen=True, slots=True)
 class Product:
     product_code: str
@@ -87,6 +91,7 @@ class CommerceService:
         self._recharges: dict[str, RechargeOrder] = {}
         self._payments: dict[str, PaymentOrder] = {}
         self._callbacks: dict[tuple[str, str], str] = {}
+        self._callback_transactions: dict[tuple[str, str], str] = {}
         self._idempotency: dict[str, tuple[tuple[str, str, str], RechargeCheckout]] = {}
         self._entitlements: dict[tuple[str, str], Entitlement] = {}
         self._chapter_policies: dict[str, ChapterPolicy] = {}
@@ -95,6 +100,7 @@ class CommerceService:
         self._lock = RLock()
         self.payment_provider = payment_provider
         self.payment_provider_secret = payment_provider_secret
+        self.record_payment_credit_failure: Callable[[str, str, int], object] | None = None
         self.record_revenue_in_transaction: Callable[[Any, str, str, int], object] | None = None
 
     def create_recharge(
@@ -144,7 +150,13 @@ class CommerceService:
                 self._idempotency[idempotency_key] = (fingerprint, checkout)
             return checkout
 
-    def handle_payment_callback(self, provider: str, event_id: str, payment_no: str) -> str:
+    def handle_payment_callback(
+        self,
+        provider: str,
+        event_id: str,
+        payment_no: str,
+        channel_transaction_id: str | None = None,
+    ) -> str:
         with self._lock:
             key = (provider, event_id)
             if key in self._callbacks:
@@ -152,6 +164,11 @@ class CommerceService:
                 if existing_recharge.payment_order.payment_no != payment_no:
                     raise ValueError("PAYMENT_EVENT_CONFLICT")
                 return self._callbacks[key]
+            if channel_transaction_id is not None:
+                transaction_key = (provider, channel_transaction_id)
+                existing_payment = self._callback_transactions.get(transaction_key)
+                if existing_payment is not None and existing_payment != payment_no:
+                    raise ValueError("PAYMENT_EVENT_CONFLICT")
             try:
                 payment = self._payments[payment_no]
             except KeyError as exc:
@@ -164,20 +181,47 @@ class CommerceService:
             if recharge.status == "PAID":
                 self._callbacks[key] = recharge.recharge_no
                 return recharge.recharge_no
-            self.wallet.grant_recharge_coin(
-                payment.account_id, recharge.recharge_coin, source_ref=recharge.recharge_no
-            )
-            if recharge.gift_coin:
-                product_expiry = datetime.now(UTC).replace(microsecond=0) + timedelta(
-                    days=recharge.gift_expires_days
+            try:
+                self.wallet.grant_recharge_coin(
+                    payment.account_id, recharge.recharge_coin, source_ref=recharge.recharge_no
                 )
-                self.wallet.grant_gift_coin(
+                if recharge.gift_coin:
+                    product_expiry = datetime.now(UTC).replace(microsecond=0) + timedelta(
+                        days=recharge.gift_expires_days
+                    )
+                    self.wallet.grant_gift_coin(
+                        payment.account_id,
+                        recharge.gift_coin,
+                        "PROMO",
+                        product_expiry,
+                        source_ref=recharge.recharge_no,
+                    )
+            except Exception:
+                if not callable(self.record_payment_credit_failure):
+                    raise
+                paid = PaymentOrder(
+                    payment.payment_no,
                     payment.account_id,
-                    recharge.gift_coin,
-                    "PROMO",
-                    product_expiry,
-                    source_ref=recharge.recharge_no,
+                    payment.channel,
+                    payment.paid_cents,
+                    "PAID",
                 )
+                self._payments[payment_no] = paid
+                self._recharges[recharge.recharge_no] = RechargeOrder(
+                    recharge.recharge_no,
+                    paid,
+                    recharge.recharge_coin,
+                    recharge.gift_coin,
+                    "CREDIT_PENDING",
+                    recharge.gift_expires_days,
+                )
+                self._callbacks[key] = recharge.recharge_no
+                if channel_transaction_id is not None:
+                    self._callback_transactions[(provider, channel_transaction_id)] = payment_no
+                self.record_payment_credit_failure(
+                    payment_no, payment.account_id, payment.paid_cents
+                )
+                return recharge.recharge_no
             paid = PaymentOrder(
                 payment.payment_no, payment.account_id, payment.channel, payment.paid_cents, "PAID"
             )
@@ -191,6 +235,70 @@ class CommerceService:
                 recharge.gift_expires_days,
             )
             self._callbacks[key] = recharge.recharge_no
+            if channel_transaction_id is not None:
+                self._callback_transactions[(provider, channel_transaction_id)] = payment_no
+            return recharge.recharge_no
+
+    def repair_payment_credit(self, payment_no: str) -> str:
+        """Retry wallet fulfillment for a provider-successful pending recharge."""
+        with self._lock:
+            payment = self._payments.get(payment_no)
+            if payment is None:
+                raise ValueError("PAYMENT_NOT_FOUND")
+            recharge = next(
+                (
+                    order
+                    for order in self._recharges.values()
+                    if order.payment_order.payment_no == payment_no
+                ),
+                None,
+            )
+            if recharge is None:
+                raise ValueError("RECHARGE_ORDER_NOT_FOUND")
+            if recharge.status == "PAID":
+                return recharge.recharge_no
+            if recharge.status != "CREDIT_PENDING":
+                raise ValueError("PAYMENT_CREDIT_STATE_CONFLICT")
+            snapshot = self.wallet.source_snapshot(payment.account_id, recharge.recharge_no)
+            recharge_total = snapshot.consumed_recharge_coin + snapshot.remaining_recharge_coin
+            if recharge_total < recharge.recharge_coin:
+                self.wallet.grant_recharge_coin(
+                    payment.account_id,
+                    recharge.recharge_coin - recharge_total,
+                    source_ref=recharge.recharge_no,
+                )
+            gift_total = (
+                snapshot.consumed_promo_gift_coin
+                + snapshot.remaining_active_promo_gift_coin
+                + snapshot.naturally_expired_promo_gift_coin
+            )
+            if gift_total < recharge.gift_coin:
+                expiry = datetime.now(UTC).replace(microsecond=0) + timedelta(
+                    days=recharge.gift_expires_days
+                )
+                self.wallet.grant_gift_coin(
+                    payment.account_id,
+                    recharge.gift_coin - gift_total,
+                    "PROMO",
+                    expiry,
+                    source_ref=recharge.recharge_no,
+                )
+            paid = PaymentOrder(
+                payment.payment_no,
+                payment.account_id,
+                payment.channel,
+                payment.paid_cents,
+                "PAID",
+            )
+            self._payments[payment_no] = paid
+            self._recharges[recharge.recharge_no] = RechargeOrder(
+                recharge.recharge_no,
+                paid,
+                recharge.recharge_coin,
+                recharge.gift_coin,
+                "PAID",
+                recharge.gift_expires_days,
+            )
             return recharge.recharge_no
 
     def handle_payment_provider_event(
@@ -205,8 +313,8 @@ class CommerceService:
             raise ValueError("PAYMENT_PROVIDER_MISMATCH")
         if not event.verify_signature(self.payment_provider_secret):
             raise ValueError("PAYMENT_SIGNATURE_INVALID")
-        current = now or datetime.now(UTC)
-        if event.available_at > current:
+        current = _utc(now or datetime.now(UTC))
+        if _utc(event.available_at) > current:
             raise ValueError("PAYMENT_EVENT_NOT_AVAILABLE")
         with self._lock:
             payment = self._payments.get(event.reference_id)
@@ -216,7 +324,10 @@ class CommerceService:
                 raise ValueError("PAYMENT_AMOUNT_MISMATCH")
             if event.status is ProviderStatus.SUCCESS:
                 return self.handle_payment_callback(
-                    event.provider, event.event_id, event.reference_id
+                    event.provider,
+                    event.event_id,
+                    event.reference_id,
+                    event.provider_transaction_id,
                 )
             key = (event.provider, event.event_id)
             existing = self._callbacks.get(key)
@@ -225,12 +336,21 @@ class CommerceService:
                 if recharge.payment_order.payment_no != event.reference_id:
                     raise ValueError("PAYMENT_EVENT_CONFLICT")
                 return existing
+            transaction_key = (event.provider, event.provider_transaction_id)
+            existing_payment = self._callback_transactions.get(transaction_key)
+            if existing_payment is not None and existing_payment != event.reference_id:
+                raise ValueError("PAYMENT_EVENT_CONFLICT")
             recharge = next(
                 order
                 for order in self._recharges.values()
                 if order.payment_order.payment_no == event.reference_id
             )
             if payment.status == "PAID" or recharge.status == "PAID":
+                raise ValueError("PAYMENT_STATE_CONFLICT")
+            if payment.status not in ("PENDING", "PROCESSING") or recharge.status not in (
+                "PENDING_PAYMENT",
+                "PROCESSING",
+            ):
                 raise ValueError("PAYMENT_STATE_CONFLICT")
             updated_payment = PaymentOrder(
                 payment.payment_no,
@@ -249,7 +369,23 @@ class CommerceService:
                 recharge.gift_expires_days,
             )
             self._callbacks[key] = recharge.recharge_no
+            self._callback_transactions[transaction_key] = event.reference_id
             return recharge.recharge_no
+
+    def payment_account(self, payment_no: str) -> str:
+        """Return the owner for a sandbox callback ownership check."""
+        with self._lock:
+            payment = self._payments.get(payment_no)
+            if payment is None:
+                raise ValueError("PAYMENT_NOT_FOUND")
+            return payment.account_id
+
+    def payment_details(self, payment_no: str) -> tuple[str, int]:
+        with self._lock:
+            payment = self._payments.get(payment_no)
+            if payment is None:
+                raise ValueError("PAYMENT_NOT_FOUND")
+            return payment.account_id, payment.paid_cents
 
     def refund_source(self, payment_no: str, recharge_no: str) -> RefundSourceSnapshot:
         with self._lock:

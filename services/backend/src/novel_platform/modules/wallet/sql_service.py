@@ -71,6 +71,10 @@ class SqlWalletService:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
+    def lock_account_in_transaction(self, connection: Connection, account_id: str) -> None:
+        """Serialize account-scoped business transactions before asset mutation."""
+        self._ensure_wallet(connection, account_id, lock=True)
+
     def balance(self, account_id: str, now: datetime | None = None) -> WalletBalance:
         at = now or datetime.now(UTC)
         with self.engine.begin() as connection:

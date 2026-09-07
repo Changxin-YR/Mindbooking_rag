@@ -89,6 +89,51 @@ class SqlContentService(ContentService):
         with self.engine.begin() as connection:
             return self._book_for_connection(connection, book_id)
 
+    def list_books_for_author(self, author_id: str) -> list[tuple[Book, BookMetadataVersion]]:
+        if not author_id.strip():
+            raise ValueError("AUTHOR_ID_REQUIRED")
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                sa.select(self._books)
+                .where(self._books.c.author_id == author_id)
+                .order_by(self._books.c.id)
+            ).mappings()
+            result: list[tuple[Book, BookMetadataVersion]] = []
+            for row in rows:
+                book = self._book_from_row(connection, row)
+                metadata_id = row["public_metadata_version_id"]
+                if metadata_id is None:
+                    metadata_id = connection.execute(
+                        sa.select(self._metadata.c.id)
+                        .where(self._metadata.c.book_id == book.id)
+                        .order_by(self._metadata.c.version.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+                if metadata_id is None:
+                    continue
+                result.append((book, self._metadata_for_connection(connection, str(metadata_id))))
+            return result
+
+    def list_all_books(self) -> list[tuple[Book, BookMetadataVersion]]:
+        with self.engine.begin() as connection:
+            rows = connection.execute(sa.select(self._books).order_by(self._books.c.id)).mappings()
+            result: list[tuple[Book, BookMetadataVersion]] = []
+            for row in rows:
+                book = self._book_from_row(connection, row)
+                metadata_id = row["public_metadata_version_id"]
+                if metadata_id is None:
+                    metadata_id = connection.execute(
+                        sa.select(self._metadata.c.id)
+                        .where(self._metadata.c.book_id == book.id)
+                        .order_by(self._metadata.c.version.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+                if metadata_id is not None:
+                    result.append(
+                        (book, self._metadata_for_connection(connection, str(metadata_id)))
+                    )
+            return result
+
     def get_book_metadata(self, book_id: str, public_only: bool = False) -> BookMetadataVersion:
         with self.engine.begin() as connection:
             book = self._book_row(connection, book_id)
@@ -563,6 +608,20 @@ class SqlContentService(ContentService):
             if volume["book_id"] != book_id:
                 raise KeyError(chapter_id)
             return chapter
+
+    def get_chapter_context_for_connection(
+        self, connection: Connection, chapter_id: str
+    ) -> tuple[Chapter, Volume, Book]:
+        """Read the chapter ownership graph on an existing transaction connection."""
+        chapter = self._chapter_for_connection(connection, chapter_id)
+        volume_row = self._require_volume_row(connection, chapter.volume_id)
+        volume = Volume(
+            id=str(volume_row["id"]),
+            book_id=str(volume_row["book_id"]),
+            number=int(volume_row["number"]),
+            title=str(volume_row["title"]),
+        )
+        return chapter, volume, self._book_for_connection(connection, volume.book_id)
 
     def _book_for_connection(self, connection: Connection, book_id: str) -> Book:
         row = self._require_book_row(connection, book_id)

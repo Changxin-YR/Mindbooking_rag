@@ -41,6 +41,7 @@ def _engine() -> sa.Engine:
         sa.Column("category", sa.String(32), nullable=False),
         sa.Column("priority", sa.String(8), nullable=False),
         sa.Column("channels", sa.String(64), nullable=False),
+        sa.Column("read_at", sa.DateTime, nullable=True),
         sa.Column("created_at", sa.DateTime, nullable=False),
     )
     sa.Table(
@@ -127,6 +128,39 @@ def test_sql_notification_persists_channels_and_marketing_preference() -> None:
     assert enabled in (True, 1)
     with pytest.raises(ValueError, match="cannot be disabled"):
         service.set_marketing_enabled("account-1", False)
+
+
+def test_sql_notification_list_reloads_account_history_and_filters_category() -> None:
+    service = SqlNotificationService(_engine())
+    service.send("account-1", NotificationCategory.SYSTEM, NotificationPriority.NORMAL, {"IN_APP"})
+    security = service.send(
+        "account-1", NotificationCategory.SECURITY, NotificationPriority.P0, {"IN_APP"}
+    )
+    service.send("account-2", NotificationCategory.SYSTEM, NotificationPriority.NORMAL, {"IN_APP"})
+
+    rebuilt = SqlNotificationService(service.engine)
+    listed = rebuilt.list("account-1")
+    assert listed[0] == security
+    assert len(listed) == 2
+    assert [
+        item.category for item in rebuilt.list("account-1", category=NotificationCategory.SECURITY)
+    ] == [NotificationCategory.SECURITY]
+
+
+def test_sql_notification_read_state_is_account_scoped_and_idempotent() -> None:
+    service = SqlNotificationService(_engine())
+    notification = service.send(
+        "account-1", NotificationCategory.SYSTEM, NotificationPriority.NORMAL, {"IN_APP"}
+    )
+    assert notification.is_read is False
+    assert service.unread_count("account-1") == 1
+
+    marked = service.mark_read("account-1", notification.id)
+    assert marked.is_read is True
+    assert service.unread_count("account-1") == 0
+    assert service.mark_read("account-1", notification.id).is_read is True
+    with pytest.raises(KeyError):
+        service.mark_read("account-2", notification.id)
 
 
 def test_sql_support_rebuild_preserves_messages_and_status_transition() -> None:

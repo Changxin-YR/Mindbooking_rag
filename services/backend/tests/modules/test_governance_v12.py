@@ -4,9 +4,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from novel_platform.main import create_app
+from novel_platform.modules.governance.api import build_governance_router
 from novel_platform.modules.governance.application import GovernanceService
 from novel_platform.modules.governance.domain import (
     AgreementAcceptance,
@@ -69,6 +71,107 @@ def test_reconciliation_preserves_channel_success_when_credit_fails() -> None:
     )
     assert item.difference is ReconciliationDifference.MISSING_LEDGER
     assert service.reconciliation_batch(batch.id).status is ReconciliationStatus.OPEN
+
+
+def test_reconciliation_batch_can_be_repaired_and_closed_idempotently() -> None:
+    service = GovernanceService()
+    batch = service.open_reconciliation("2026-09-05")
+    repaired = service.mark_reconciliation_repaired(batch.id, "finance-1")
+    assert repaired.status is ReconciliationStatus.REPAIRED
+    closed = service.close_reconciliation(batch.id, "finance-2")
+    assert closed.status is ReconciliationStatus.CLOSED
+    assert service.close_reconciliation(batch.id, "finance-3").status is ReconciliationStatus.CLOSED
+    assert [item.id for item in service.list_reconciliation_batches()] == [batch.id]
+
+
+def test_credit_pending_repair_retries_once_and_is_idempotent() -> None:
+    service = GovernanceService()
+    pending = service.record_payment_credit_failure("pay-repair", "acct-1", 1000)
+    calls: list[str] = []
+    service.repair_payment_credit = lambda payment_id: calls.append(payment_id) or "REPAIRED"
+
+    repaired = service.retry_payment_credit(pending.payment_id, "staff-1")
+    assert repaired.status == "RESOLVED"
+    assert repaired.attempts == 1
+    assert repaired.repair_actor_id == "staff-1"
+    assert calls == ["pay-repair"]
+
+    again = service.retry_payment_credit(pending.payment_id, "staff-2")
+    assert again.id == repaired.id
+    assert again.status == "RESOLVED"
+    assert again.attempts == 1
+    assert calls == ["pay-repair"]
+
+
+def test_credit_pending_repair_failure_is_repair_required_and_listable() -> None:
+    service = GovernanceService()
+    pending = service.record_payment_credit_failure("pay-fail", "acct-1", 1000)
+
+    def fail(_: str) -> None:
+        raise RuntimeError("wallet unavailable")
+
+    service.repair_payment_credit = fail
+    failed = service.retry_payment_credit(pending.payment_id, "staff-1")
+    assert failed.status == "REPAIR_REQUIRED"
+    assert failed.attempts == 1
+    assert failed.last_error == "wallet unavailable"
+    assert [item.payment_id for item in service.list_payment_credit_pending()] == ["pay-fail"]
+
+
+def test_credit_pending_auto_repair_attempts_only_new_pending_records() -> None:
+    service = GovernanceService()
+    service.record_payment_credit_failure("pay-auto", "acct-1", 1000)
+    service.repair_payment_credit = lambda _: True
+
+    repaired = service.auto_repair_payment_credits()
+    assert [item.payment_id for item in repaired] == ["pay-auto"]
+    assert service.list_payment_credit_pending() == ()
+
+
+def test_credit_pending_staff_api_lists_and_retries_with_explicit_actor() -> None:
+    service = GovernanceService()
+    service.record_payment_credit_failure("pay-api", "acct-1", 1000)
+    service.repair_payment_credit = lambda _: True
+    app = FastAPI()
+    app.include_router(build_governance_router(service))
+    client = TestClient(app)
+
+    listed = client.get("/admin/api/v1/reconciliation/credit-pending")
+    assert listed.status_code == 200
+    assert listed.json()[0]["payment_id"] == "pay-api"
+    retried = client.post(
+        "/admin/api/v1/reconciliation/credit-pending/pay-api/retry",
+        params={"operator_id": "staff-api"},
+    )
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "RESOLVED"
+
+
+def test_reconciliation_batch_api_exposes_repair_and_close_workflow() -> None:
+    service = GovernanceService()
+    app = FastAPI()
+    app.include_router(build_governance_router(service))
+    client = TestClient(app)
+
+    created = client.post(
+        "/admin/api/v1/reconciliation/batches", json={"business_date": "2026-09-05"}
+    )
+    assert created.status_code == 201
+    batch_id = created.json()["id"]
+    listed = client.get("/admin/api/v1/reconciliation/batches")
+    assert listed.status_code == 200
+    assert listed.json()[0]["status"] == "OPEN"
+    repaired = client.post(
+        f"/admin/api/v1/reconciliation/batches/{batch_id}/repair",
+        params={"operator_id": "finance-1"},
+    )
+    assert repaired.status_code == 200
+    closed = client.post(
+        f"/admin/api/v1/reconciliation/batches/{batch_id}/close",
+        params={"operator_id": "finance-2"},
+    )
+    assert closed.status_code == 200
+    assert closed.json()["status"] == "CLOSED"
 
 
 def test_emergency_and_outbox_are_explicit_and_recoverable() -> None:

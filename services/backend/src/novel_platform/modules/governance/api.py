@@ -1,16 +1,20 @@
+from collections.abc import Callable
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from novel_platform.core.auth import SessionClaims
 from novel_platform.core.http_auth import (
     optional_session,
     require_account_access,
-    require_staff_session,
+    require_staff_authorization,
 )
 from novel_platform.modules.governance.application import GovernanceService
-from novel_platform.modules.governance.domain import ReconciliationDifference
+from novel_platform.modules.governance.domain import (
+    ReconciliationBatch,
+    ReconciliationDifference,
+)
 
 
 class PrivacyRequestBody(BaseModel):
@@ -45,6 +49,20 @@ class CreditFailureBody(BaseModel):
     amount_cents: int = Field(gt=0)
 
 
+class PaymentCreditPendingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    payment_id: str
+    account_id: str
+    amount_cents: int
+    status: str
+    attempts: int
+    last_error: str | None = None
+    last_attempted_at: str | None = None
+    resolved_at: str | None = None
+    repair_actor_id: str | None = None
+
+
 class ReconciliationBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     business_date: str = Field(min_length=1)
@@ -55,6 +73,15 @@ class ReconciliationItemBody(BaseModel):
     reference: str = Field(min_length=1)
     difference: ReconciliationDifference
     amount_cents: int = Field(ge=0)
+
+
+class ReconciliationBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    business_date: str
+    status: str
+    items: list[dict[str, object]]
 
 
 class EmergencyBody(BaseModel):
@@ -85,12 +112,41 @@ class InvoiceDocumentBody(BaseModel):
 
 
 def build_governance_router(
-    service: GovernanceService, *, auth_required: bool = False
+    service: GovernanceService,
+    *,
+    auth_required: bool = False,
+    authorize_staff: Callable[[SessionClaims, str], None] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["governance"])
 
+    def require_governance_staff(request: Request) -> SessionClaims | None:
+        if auth_required:
+            return require_staff_authorization(request, authorize_staff, "governance.write")
+        return None
+
+    def require_finance_staff(request: Request) -> None:
+        if auth_required:
+            require_staff_authorization(request, authorize_staff, "finance.write")
+
     def staff_actor(request: Request, supplied: str) -> str:
-        return require_staff_session(request).account_id if auth_required else supplied
+        claims = require_governance_staff(request)
+        return claims.account_id if claims is not None else supplied
+
+    def reconciliation_response(batch: ReconciliationBatch) -> ReconciliationBatchResponse:
+        return ReconciliationBatchResponse(
+            id=batch.id,
+            business_date=batch.business_date,
+            status=batch.status.value,
+            items=[
+                {
+                    "id": item.id,
+                    "reference": item.reference,
+                    "difference": item.difference.value,
+                    "amount_cents": item.amount_cents,
+                }
+                for item in batch.items
+            ],
+        )
 
     @router.post("/api/v1/privacy/requests", status_code=status.HTTP_201_CREATED)
     def privacy_request(
@@ -136,8 +192,7 @@ def build_governance_router(
     def activate_parameter(
         parameter_id: str, payload: ParameterActivationBody, request: Request
     ) -> dict[str, object]:
-        if auth_required:
-            require_staff_session(request)
+        require_governance_staff(request)
         try:
             return asdict(service.activate_parameter(parameter_id, payload.effective_at))
         except KeyError as exc:
@@ -147,14 +202,68 @@ def build_governance_router(
 
     @router.post("/admin/api/v1/reconciliation/credit-pending", status_code=status.HTTP_201_CREATED)
     def credit_pending(payload: CreditFailureBody, request: Request) -> dict[str, object]:
-        if auth_required:
-            require_staff_session(request)
+        require_governance_staff(request)
         return asdict(service.record_payment_credit_failure(**payload.model_dump()))
+
+    @router.get(
+        "/admin/api/v1/reconciliation/credit-pending",
+        response_model=list[PaymentCreditPendingResponse],
+    )
+    def list_credit_pending(
+        request: Request, status_filter: str | None = Query(default=None, alias="status")
+    ) -> list[PaymentCreditPendingResponse]:
+        if auth_required:
+            require_staff_authorization(request, authorize_staff, "governance.read")
+        try:
+            items = service.list_payment_credit_pending(status_filter)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        return [
+            PaymentCreditPendingResponse(
+                **{
+                    **asdict(item),
+                    "last_attempted_at": item.last_attempted_at.isoformat()
+                    if item.last_attempted_at is not None
+                    else None,
+                    "resolved_at": item.resolved_at.isoformat()
+                    if item.resolved_at is not None
+                    else None,
+                }
+            )
+            for item in items
+        ]
+
+    @router.post(
+        "/admin/api/v1/reconciliation/credit-pending/{payment_id}/retry",
+        response_model=PaymentCreditPendingResponse,
+    )
+    def retry_credit_pending(
+        payment_id: str, request: Request, operator_id: str | None = None
+    ) -> PaymentCreditPendingResponse:
+        actor = staff_actor(request, operator_id or "")
+        try:
+            item = service.retry_payment_credit(payment_id, actor)
+        except KeyError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail="credit pending not found"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        return PaymentCreditPendingResponse(
+            **{
+                **asdict(item),
+                "last_attempted_at": item.last_attempted_at.isoformat()
+                if item.last_attempted_at is not None
+                else None,
+                "resolved_at": item.resolved_at.isoformat()
+                if item.resolved_at is not None
+                else None,
+            }
+        )
 
     @router.post("/admin/api/v1/reconciliation/batches", status_code=status.HTTP_201_CREATED)
     def reconciliation(payload: ReconciliationBody, request: Request) -> dict[str, object]:
-        if auth_required:
-            require_staff_session(request)
+        require_governance_staff(request)
         return asdict(service.open_reconciliation(**payload.model_dump()))
 
     @router.post(
@@ -163,14 +272,64 @@ def build_governance_router(
     def reconciliation_item(
         batch_id: str, payload: ReconciliationItemBody, request: Request
     ) -> dict[str, object]:
-        if auth_required:
-            require_staff_session(request)
+        require_governance_staff(request)
         try:
             return asdict(service.add_reconciliation_item(batch_id, **payload.model_dump()))
         except KeyError as exc:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail="reconciliation batch not found"
             ) from exc
+
+    @router.get(
+        "/admin/api/v1/reconciliation/batches",
+        response_model=list[ReconciliationBatchResponse],
+    )
+    def list_reconciliation_batches(
+        request: Request, status_filter: str | None = None
+    ) -> list[ReconciliationBatchResponse]:
+        if auth_required:
+            require_staff_authorization(request, authorize_staff, "governance.read")
+        try:
+            return [
+                reconciliation_response(item)
+                for item in service.list_reconciliation_batches(status_filter)
+            ]
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    @router.post(
+        "/admin/api/v1/reconciliation/batches/{batch_id}/repair",
+        response_model=ReconciliationBatchResponse,
+    )
+    def repair_reconciliation_batch(
+        batch_id: str, request: Request, operator_id: str | None = None
+    ) -> ReconciliationBatchResponse:
+        actor = staff_actor(request, operator_id or "")
+        try:
+            return reconciliation_response(service.mark_reconciliation_repaired(batch_id, actor))
+        except KeyError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail="reconciliation batch not found"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post(
+        "/admin/api/v1/reconciliation/batches/{batch_id}/close",
+        response_model=ReconciliationBatchResponse,
+    )
+    def close_reconciliation_batch(
+        batch_id: str, request: Request, operator_id: str | None = None
+    ) -> ReconciliationBatchResponse:
+        actor = staff_actor(request, operator_id or "")
+        try:
+            return reconciliation_response(service.close_reconciliation(batch_id, actor))
+        except KeyError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail="reconciliation batch not found"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @router.post("/admin/api/v1/emergencies", status_code=status.HTTP_201_CREATED)
     def emergency(payload: EmergencyBody, request: Request) -> dict[str, object]:
@@ -194,8 +353,7 @@ def build_governance_router(
 
     @router.post("/admin/api/v1/outbox/events", status_code=status.HTTP_201_CREATED)
     def outbox_event(payload: OutboxBody, request: Request) -> dict[str, object]:
-        if auth_required:
-            require_staff_session(request)
+        require_governance_staff(request)
         return asdict(service.enqueue_outbox(**payload.model_dump()))
 
     @router.post("/api/v1/invoices", status_code=status.HTTP_201_CREATED)
@@ -210,8 +368,7 @@ def build_governance_router(
     def issue_invoice(
         invoice_id: str, payload: InvoiceDocumentBody, request: Request
     ) -> dict[str, object]:
-        if auth_required:
-            require_staff_session(request)
+        require_finance_staff(request)
         try:
             return asdict(service.issue_invoice(invoice_id, payload.document_id))
         except KeyError as exc:
@@ -223,8 +380,7 @@ def build_governance_router(
     def reverse_invoice(
         invoice_id: str, payload: InvoiceDocumentBody, request: Request
     ) -> dict[str, object]:
-        if auth_required:
-            require_staff_session(request)
+        require_finance_staff(request)
         try:
             return asdict(service.reverse_invoice(invoice_id, payload.document_id))
         except KeyError as exc:

@@ -1,6 +1,10 @@
-from fastapi import APIRouter, HTTPException, status
+from collections.abc import Callable
+
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import require_staff_authorization
 from novel_platform.modules.risk.application import RiskService
 from novel_platform.modules.risk.domain import RiskSignalStatus
 
@@ -49,11 +53,21 @@ class WatchlistReleaseRequest(BaseModel):
     case_id: str = Field(min_length=1)
 
 
-def build_risk_router(service: RiskService) -> APIRouter:
+def build_risk_router(
+    service: RiskService,
+    *,
+    auth_required: bool = False,
+    authorize_staff: Callable[[SessionClaims, str], None] | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/admin/api/v1/risk", tags=["risk"])
 
+    def require_risk_staff(request: Request) -> None:
+        if auth_required:
+            require_staff_authorization(request, authorize_staff, "risk.write")
+
     @router.post("/signals", response_model=RiskSignalResponse, status_code=status.HTTP_201_CREATED)
-    def observe_signal(payload: ObserveSignalRequest) -> RiskSignalResponse:
+    def observe_signal(payload: ObserveSignalRequest, request: Request) -> RiskSignalResponse:
+        require_risk_staff(request)
         try:
             signal = service.observe(payload.account_id, payload.signal_type, payload.order_id)
         except KeyError as exc:
@@ -61,7 +75,8 @@ def build_risk_router(service: RiskService) -> APIRouter:
         return RiskSignalResponse.model_validate(signal, from_attributes=True)
 
     @router.post("/signals/{signal_id}/freeze", response_model=RiskSignalResponse)
-    def freeze_signal(signal_id: str) -> RiskSignalResponse:
+    def freeze_signal(signal_id: str, request: Request) -> RiskSignalResponse:
+        require_risk_staff(request)
         try:
             return RiskSignalResponse.model_validate(
                 service.freeze(signal_id), from_attributes=True
@@ -70,7 +85,8 @@ def build_risk_router(service: RiskService) -> APIRouter:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="signal not found") from exc
 
     @router.post("/login-signals", status_code=status.HTTP_201_CREATED)
-    def login_signal(payload: LoginSignalRequest) -> dict[str, object]:
+    def login_signal(payload: LoginSignalRequest, request: Request) -> dict[str, object]:
+        require_risk_staff(request)
         try:
             signal = service.record_login(**payload.model_dump())
         except ValueError as exc:
@@ -92,7 +108,8 @@ def build_risk_router(service: RiskService) -> APIRouter:
         )
 
     @router.post("/watchlist", status_code=status.HTTP_201_CREATED)
-    def add_watchlist(payload: WatchlistRequest) -> dict[str, object]:
+    def add_watchlist(payload: WatchlistRequest, request: Request) -> dict[str, object]:
+        require_risk_staff(request)
         try:
             entry = service.add_watchlist(**payload.model_dump())
         except ValueError as exc:
@@ -107,7 +124,10 @@ def build_risk_router(service: RiskService) -> APIRouter:
         }
 
     @router.post("/watchlist/{entry_id}/release")
-    def release_watchlist(entry_id: str, payload: WatchlistReleaseRequest) -> dict[str, object]:
+    def release_watchlist(
+        entry_id: str, payload: WatchlistReleaseRequest, request: Request
+    ) -> dict[str, object]:
+        require_risk_staff(request)
         try:
             entry = service.release_watchlist(entry_id, **payload.model_dump())
         except KeyError as exc:
