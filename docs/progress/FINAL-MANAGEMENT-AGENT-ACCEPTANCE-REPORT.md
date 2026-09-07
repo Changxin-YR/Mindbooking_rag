@@ -4,9 +4,9 @@
 
 ## 结论
 
-**B：有条件通过。**
+**B+：有条件通过。**
 
-最终 SHA 已推送并通过远端 Foundation、Backend、Frontend 三道 CI。Docker Compose、MySQL、Harness 均已健康，完整 QA 与新增真实 MySQL Agent 写入/人工等价验收通过。唯一仍不能伪造为 PASS 的条件是未提供 DeepSeek live credential；生产支付/银行/税务 Provider 仍是 Sandbox PASS、生产未认证。
+Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真实 MySQL 等价链和 CI 均已通过。唯一阻塞项是未提供 DeepSeek live credential，因此 LIVE LLM 不能伪造为 PASS。真实支付、银行、税务 Provider 认证属于本作品集项目范围外，不降低项目级验收等级。
 
 ## 变更基线
 
@@ -15,9 +15,10 @@
 - CI 修复提交：55e4090 fix(ci): restore reproducible quality gates
 - Agent/管理系统实现提交：5203fd4（含前序 94d8dd9、67beaed）
 - 环境：Windows、Python 3.x、Node 24、pnpm 11.22.0；时间：2026-09-08（Asia/Shanghai）
-- 第二轮最终代码验证 SHA：`03cb5b6facaaeda539f6e3c71b7aa3a213cc2cb3`
+- Validated implementation SHA：`90a1ab0ffabdaf0788843c256bfc51febd50af28`
+- Final documentation commit：见 PR #1 当前 head（文档提交不改变上述实现证据）
 - PR：<https://github.com/Changxin-YR/Mindbooking_rag/pull/1>
-- Exact-SHA CI：<https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154592630>
+- Latest passing CI（validated implementation）：<https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708>
 - Docker Compose：MySQL、Backend、Admin、Reader、Writer、Harness、OpenSearch、Redis、RabbitMQ、ClickHouse、MinIO、Nginx 全部 healthy；Alembic head=`0042_agent_audit_pending_action`
 
 ## 已修复
@@ -61,9 +62,9 @@
 
 | Workflow | Run / Job | 结论 |
 | --- | --- | --- |
-| Foundation | [run 34154592630](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154592630) / Foundation configuration | PASS |
-| Backend | [run 34154592630](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154592630) / Backend tests and quality | PASS (`357 passed`) |
-| Frontend | [run 34154592630](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154592630) / Frontend tests and builds | PASS |
+| Foundation | [run 34154842708](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708) / Foundation configuration | PASS |
+| Backend | [run 34154842708](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708) / Backend tests and quality | PASS (`357 passed`) |
+| Frontend | [run 34154842708](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708) / Frontend tests and builds | PASS |
 
 本轮后端测试共 357 个通过，无 skip；pytest 仅有第三方弃用警告。
 
@@ -81,10 +82,11 @@
 
 | 项目 | 状态 | 证据/原因 |
 | --- | --- | --- |
-| LIVE_LLM | BLOCKED_BY_CREDENTIAL | 未提供 DeepSeek API credential；Fake adapter 已通过 |
+| LIVE_LLM | BLOCKED_BY_CREDENTIAL | 当前环境未提供 DeepSeek API/Harness credential；Fake adapter、Harness 集成和安全契约已通过 |
 | MySQL Agent E2E | PASS | `scripts/qa_agent_mysql_e2e.py` 通过人工/Agent 审核等价、PendingAction/Audit 持久化核对 |
 | Compose/Browser full role E2E | PASS | Compose smoke、Harness browser E2E、Reader/Writer/Admin builds 全部通过 |
-| Production payment/payout/tax | SANDBOX PASS / NOT CERTIFIED | 真实第三方凭据与生产政策不在当前环境 |
+| Production Provider Certification | OUT OF SCOPE | Portfolio / resume project; no real-money production operation |
+| Sandbox payment/payout | PASS | success、failure、timeout、duplicate callback、invalid signature、replay protection、idempotency 均已覆盖 |
 | Session restart / second runtime | PASS | SQL session store 重建后恢复消息、实体上下文并保持 Staff 隔离 |
 | Multi-instance logical context | PASS（logical SQL store） | 两个独立 `SqlAgentSessionStore` 实例共享 SQL session/message/context；并发版本冲突返回 `409 AGENT_SESSION_VERSION_CONFLICT`。未宣称生产容量/DR。 |
 
@@ -95,4 +97,4 @@
 - Gate 3 权限安全：RBAC、DataScope、actor 防伪、注入拒绝、确认重放保护 PASS。
 - Gate 4 真实业务：人工、Agent、Hybrid、真实 MySQL Agent 等价链 PASS；Live DeepSeek 仍待 credential。
 
-当前不存在已复现的 P0/P1 代码缺陷。因用户要求真实 DeepSeek 智能体验收，`LIVE_LLM=BLOCKED_BY_CREDENTIAL`，最终等级保持严格 B；平台架构、Fake Harness、RBAC/DataScope、MySQL 和浏览器验收均已通过。
+当前不存在已复现的 P0/P1 代码缺陷。`Platform Engineering=A`、`Agent Security=A`、`Agent Business Execution=A`；`LIVE DeepSeek=BLOCKED_BY_CREDENTIAL`。因此 Portfolio Acceptance 总等级为 **B+**。生产支付、银行、税务 Provider Certification 明确为 **OUT OF SCOPE**。
