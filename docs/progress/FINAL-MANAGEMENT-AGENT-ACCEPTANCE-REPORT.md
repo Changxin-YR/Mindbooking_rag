@@ -15,9 +15,9 @@
 - CI 修复提交：55e4090 fix(ci): restore reproducible quality gates
 - Agent/管理系统实现提交：5203fd4（含前序 94d8dd9、67beaed）
 - 环境：Windows、Python 3.x、Node 24、pnpm 11.22.0；时间：2026-09-08（Asia/Shanghai）
-- 第二轮最终代码/分支验证 SHA：`b5151f0d7c3e02ca4a9089eef26793994f66c04a`
+- 第二轮最终代码验证 SHA：`03cb5b6facaaeda539f6e3c71b7aa3a213cc2cb3`
 - PR：<https://github.com/Changxin-YR/Mindbooking_rag/pull/1>
-- Exact-SHA CI：<https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34153828303>
+- Exact-SHA CI：<https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154592630>
 - Docker Compose：MySQL、Backend、Admin、Reader、Writer、Harness、OpenSearch、Redis、RabbitMQ、ClickHouse、MinIO、Nginx 全部 healthy；Alembic head=`0042_agent_audit_pending_action`
 
 ## 已修复
@@ -61,9 +61,9 @@
 
 | Workflow | Run / Job | 结论 |
 | --- | --- | --- |
-| Foundation | [run 34153828303](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34153828303) / Foundation configuration | PASS |
-| Backend | [run 34153828303](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34153828303) / Backend tests and quality | PASS (`357 passed`) |
-| Frontend | [run 34153828303](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34153828303) / Frontend tests and builds | PASS |
+| Foundation | [run 34154592630](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154592630) / Foundation configuration | PASS |
+| Backend | [run 34154592630](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154592630) / Backend tests and quality | PASS (`357 passed`) |
+| Frontend | [run 34154592630](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154592630) / Frontend tests and builds | PASS |
 
 本轮后端测试共 357 个通过，无 skip；pytest 仅有第三方弃用警告。
 
