@@ -52,7 +52,12 @@ class OperationService:
         if not items:
             return ()
         latest_snapshot = items[-1].snapshot_id
-        return tuple(sorted((item for item in items if item.snapshot_id == latest_snapshot), key=lambda item: item.rank))
+        return tuple(
+            sorted(
+                (item for item in items if item.snapshot_id == latest_snapshot),
+                key=lambda item: item.rank,
+            )
+        )
 
     def editorial_slot(self, book_id: str, position: int, snapshot_id: str) -> RankingItem:
         if position < 1:

@@ -9,7 +9,11 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import NoSuchTableError
 
 from novel_platform.modules.reading.application import ReadingService
-from novel_platform.modules.reading.domain import ProgressConflict, ReadingPreferences, ReadingProgress
+from novel_platform.modules.reading.domain import (
+    ProgressConflict,
+    ReadingPreferences,
+    ReadingProgress,
+)
 
 
 class SqlReadingService(ReadingService):
@@ -21,7 +25,9 @@ class SqlReadingService(ReadingService):
         metadata = sa.MetaData()
         self._progress_table = sa.Table("book_reading_progress", metadata, autoload_with=engine)
         try:
-            self._preferences_table: sa.Table | None = sa.Table("reading_preferences", metadata, autoload_with=engine)
+            self._preferences_table: sa.Table | None = sa.Table(
+                "reading_preferences", metadata, autoload_with=engine
+            )
         except NoSuchTableError:
             # Older test/upgrade fixtures can still omit this optional reader table.
             self._preferences_table = None
@@ -30,18 +36,43 @@ class SqlReadingService(ReadingService):
         if self._preferences_table is None:
             return super().get_preferences(account_id)
         with self.engine.begin() as connection:
-            row = connection.execute(sa.select(self._preferences_table).where(self._preferences_table.c.account_id == account_id)).mappings().one_or_none()
-        return ReadingPreferences(account_id, **json.loads(row["preferences_json"])) if row else ReadingPreferences(account_id)
+            row = (
+                connection.execute(
+                    sa.select(self._preferences_table).where(
+                        self._preferences_table.c.account_id == account_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return (
+            ReadingPreferences(account_id, **json.loads(row["preferences_json"]))
+            if row
+            else ReadingPreferences(account_id)
+        )
 
     def update_preferences(self, account_id: str, **values: object) -> ReadingPreferences:
         updated = super().update_preferences(account_id, **values)
         if self._preferences_table is None:
             return updated
-        payload = {field: getattr(updated, field) for field in ReadingPreferences.__dataclass_fields__ if field != "account_id"}
+        payload = {
+            field: getattr(updated, field)
+            for field in ReadingPreferences.__dataclass_fields__
+            if field != "account_id"
+        }
         with self.engine.begin() as connection:
-            result = connection.execute(self._preferences_table.update().where(self._preferences_table.c.account_id == account_id).values(preferences_json=json.dumps(payload, ensure_ascii=False)))
+            result = connection.execute(
+                self._preferences_table.update()
+                .where(self._preferences_table.c.account_id == account_id)
+                .values(preferences_json=json.dumps(payload, ensure_ascii=False))
+            )
             if result.rowcount == 0:
-                connection.execute(self._preferences_table.insert().values(account_id=account_id, preferences_json=json.dumps(payload, ensure_ascii=False)))
+                connection.execute(
+                    self._preferences_table.insert().values(
+                        account_id=account_id,
+                        preferences_json=json.dumps(payload, ensure_ascii=False),
+                    )
+                )
         return updated
 
     def get_progress(self, account_id: str, book_id: str) -> ReadingProgress:

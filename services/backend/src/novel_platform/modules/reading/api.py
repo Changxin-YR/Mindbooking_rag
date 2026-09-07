@@ -8,7 +8,7 @@ from novel_platform.core.http_auth import optional_session, require_account_acce
 from novel_platform.modules.content.application import ContentService
 from novel_platform.modules.membership.domain import AccessMode, ChapterPolicy
 from novel_platform.modules.reading.application import ContentAccessService, ReadingService
-from novel_platform.modules.reading.domain import ProgressConflict, ReadingPreferences, TtsMetadata
+from novel_platform.modules.reading.domain import ProgressConflict, TtsMetadata
 
 
 class ProgressRequest(BaseModel):
@@ -246,13 +246,29 @@ def build_reading_router(
         require_account_access(session, account_id, required=auth_required)
         return _response(service.get_progress(account_id, book_id))
 
-    @router.get("/accounts/{account_id}/reading-preferences", response_model=ReadingPreferencesResponse, operation_id="reader_get_reading_preferences")
-    def get_reading_preferences(account_id: str, session: SessionClaims | None = Depends(optional_session)) -> ReadingPreferencesResponse:
+    @router.get(
+        "/accounts/{account_id}/reading-preferences",
+        response_model=ReadingPreferencesResponse,
+        operation_id="reader_get_reading_preferences",
+    )
+    def get_reading_preferences(
+        account_id: str, session: SessionClaims | None = Depends(optional_session)
+    ) -> ReadingPreferencesResponse:
         require_account_access(session, account_id, required=auth_required)
-        return ReadingPreferencesResponse.model_validate(service.get_preferences(account_id), from_attributes=True)
+        return ReadingPreferencesResponse.model_validate(
+            service.get_preferences(account_id), from_attributes=True
+        )
 
-    @router.put("/accounts/{account_id}/reading-preferences", response_model=ReadingPreferencesResponse, operation_id="reader_update_reading_preferences")
-    def update_reading_preferences(account_id: str, payload: ReadingPreferencesRequest, session: SessionClaims | None = Depends(optional_session)) -> ReadingPreferencesResponse:
+    @router.put(
+        "/accounts/{account_id}/reading-preferences",
+        response_model=ReadingPreferencesResponse,
+        operation_id="reader_update_reading_preferences",
+    )
+    def update_reading_preferences(
+        account_id: str,
+        payload: ReadingPreferencesRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> ReadingPreferencesResponse:
         require_account_access(session, account_id, required=auth_required)
         try:
             updated = service.update_preferences(account_id, **payload.model_dump())

@@ -96,7 +96,9 @@ class InMemoryIdentityRepository:
     def create_account(self) -> PlatformAccount:
         with self._guard:
             account_id = uuid4().hex
-            account = PlatformAccount(account_id, AccountStatus.ACTIVE, public_account_no(account_id))
+            account = PlatformAccount(
+                account_id, AccountStatus.ACTIVE, public_account_no(account_id)
+            )
             self._accounts[account.id] = account
             return account
 
@@ -399,6 +401,7 @@ class SqlIdentityRepository:
                 .order_by(login_identities.c.id)
                 .limit(1)
             ).scalar_one_or_none()
+
     def update_account_profile(
         self, account_id: str, *, nickname: str | None = None, login_name: str | None = None
     ) -> PlatformAccount:

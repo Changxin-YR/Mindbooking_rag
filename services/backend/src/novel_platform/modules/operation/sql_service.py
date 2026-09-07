@@ -79,12 +79,16 @@ class SqlOperationService(OperationService):
 
     def public_rankings(self, kind: RankingKind = RankingKind.ALGORITHM) -> tuple[RankingItem, ...]:
         with self.engine.begin() as connection:
-            latest_snapshot = connection.execute(
-                sa.select(self._rankings)
-                .where(self._rankings.c.kind == kind.value)
-                .order_by(self._rankings.c.created_at.desc(), self._rankings.c.id.desc())
-                .limit(1)
-            ).mappings().one_or_none()
+            latest_snapshot = (
+                connection.execute(
+                    sa.select(self._rankings)
+                    .where(self._rankings.c.kind == kind.value)
+                    .order_by(self._rankings.c.created_at.desc(), self._rankings.c.id.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
             if latest_snapshot is None:
                 return ()
             rows = connection.execute(

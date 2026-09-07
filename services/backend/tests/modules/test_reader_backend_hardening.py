@@ -133,7 +133,10 @@ def test_reading_preferences_round_trip_is_account_scoped() -> None:
     assert updated.status_code == 200
     assert updated.json()["mode"] == "paged"
     assert client.get("/api/v1/accounts/account-1/reading-preferences").json()["font_size"] == 22
-    assert client.put(
-        "/api/v1/accounts/account-1/reading-preferences",
-        json={"font_size": 99},
-    ).status_code == 422
+    assert (
+        client.put(
+            "/api/v1/accounts/account-1/reading-preferences",
+            json={"font_size": 99},
+        ).status_code
+        == 422
+    )

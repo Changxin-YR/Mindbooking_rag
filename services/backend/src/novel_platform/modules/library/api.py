@@ -93,9 +93,11 @@ def build_library_router(
         session: SessionClaims | None = Depends(optional_session),
     ) -> dict[str, object]:
         require_account_access(session, account_id, required=auth_required)
-        return {"account_id": account_id, "book_id": book_id, "in_bookshelf": any(
-            entry.book_id == book_id for entry in service.list(account_id)
-        )}
+        return {
+            "account_id": account_id,
+            "book_id": book_id,
+            "in_bookshelf": any(entry.book_id == book_id for entry in service.list(account_id)),
+        }
 
     @router.post(
         "/books/{book_id}/bookshelf",

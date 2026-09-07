@@ -421,7 +421,9 @@ def test_reader_lists_and_reads_multiple_published_chapters_in_order() -> None:
     versions = []
     for number, text in ((1, "第一章的完整正文。"), (2, "第二章的完整正文。")):
         chapter = content.create_chapter(volume.id, f"第{number}章", CommercialPolicy.FREE, number)
-        versions.append(content.create_chapter_version(chapter.id, content.save_draft(chapter.id, text).id))
+        versions.append(
+            content.create_chapter_version(chapter.id, content.save_draft(chapter.id, text).id)
+        )
     content.publish_fixed_versions(book.id, [version.id for version in versions])
 
     detail = client.get(f"/api/v1/books/{book.id}")

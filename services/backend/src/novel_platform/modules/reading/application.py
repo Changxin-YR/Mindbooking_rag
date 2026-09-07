@@ -1,13 +1,14 @@
 import re
 from dataclasses import replace
+from typing import Any, cast
 
 from novel_platform.modules.content.domain import CommercialPolicy
 from novel_platform.modules.reading.domain import (
     AccessDecision,
     AccessResult,
     ProgressConflict,
-    ReadingProgress,
     ReadingPreferences,
+    ReadingProgress,
     TtsMetadata,
     TtsSegment,
 )
@@ -52,11 +53,17 @@ class ReadingService:
 
     def update_preferences(self, account_id: str, **values: object) -> ReadingPreferences:
         current = self.get_preferences(account_id)
-        allowed = {field for field in ReadingPreferences.__dataclass_fields__ if field != "account_id"}
+        allowed = {
+            field for field in ReadingPreferences.__dataclass_fields__ if field != "account_id"
+        }
         unknown = set(values) - allowed
         if unknown:
-            raise ValueError(f"unsupported reading preference: {sorted(unknown)[0]}")
-        updated = ReadingPreferences(account_id, **{field: values.get(field, getattr(current, field)) for field in allowed})
+            raise ValueError(f"unsupported reading preference: {min(unknown)}")
+        updated_values = cast(
+            dict[str, Any],
+            {field: values.get(field, getattr(current, field)) for field in allowed},
+        )
+        updated = ReadingPreferences(account_id, **updated_values)
         self._preferences[account_id] = updated
         return updated
 

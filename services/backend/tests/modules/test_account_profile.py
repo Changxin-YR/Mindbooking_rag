@@ -6,9 +6,7 @@ from novel_platform.modules.iam.repository import InMemoryIdentityRepository
 
 
 def _account(client: TestClient, phone: str) -> tuple[str, str]:
-    created = client.post(
-        "/api/v1/iam/accounts", json={"phone": phone, "password": "Correct#123"}
-    )
+    created = client.post("/api/v1/iam/accounts", json={"phone": phone, "password": "Correct#123"})
     assert created.status_code == 201, created.text
     token = client.post(
         "/api/v1/iam/sessions", json={"phone": phone, "password": "Correct#123"}
