@@ -28,7 +28,9 @@ from novel_platform.modules.admin_center.sql_service import SqlAdminCenterServic
 from novel_platform.modules.agent import (
     AgentGateway,
     InMemoryAgentAuditLog,
+    SqlPendingActionStore,
     ToolResource,
+    build_agent_action_router,
     build_agent_admin_router,
     build_agent_gateway_router,
     build_agent_runtime_router,
@@ -275,7 +277,36 @@ def create_app() -> FastAPI:
     )
     agent_audit_sink = SqlAgentAuditSink(engine) if engine is not None else InMemoryAgentAuditLog()
     app.state.agent_audit_sink = agent_audit_sink
-    agent_gateway = AgentGateway(platform, audit_sink=agent_audit_sink)
+    pending_store = (
+        SqlPendingActionStore(engine) if engine is not None and hasattr(engine, "connect") else None
+    )
+    agent_gateway = AgentGateway(
+        platform,
+        audit_sink=agent_audit_sink,
+        pending_store=pending_store,
+    )
+
+    def agent_book_in_scope(arguments: dict[str, Any], context: Any) -> bool:
+        """Resolve a book resource through the Staff DataScope, never by prompt claims."""
+        book_id = arguments.get("book_id")
+        if not isinstance(book_id, str) or not book_id.strip() or context is None:
+            return False
+        if platform.can_access(context.actor_id, "content.read", "BOOK", book_id):
+            return True
+        if any(
+            scope_type.upper() == "CUSTOM" and scope_value in {book_id, f"BOOK:{book_id}"}
+            for scope_type, scope_value in context.data_scopes
+        ):
+            return True
+        review_service = getattr(app.state, "review_service", None)
+        if review_service is None:
+            return False
+        return any(
+            submission.book_id == book_id
+            for scope_type, scope_value in context.data_scopes
+            for submission in review_service.list_submissions_for_scope(scope_type, scope_value)
+        )
+
     agent_gateway.register(
         ToolResource(
             name="content.get_book",
@@ -287,6 +318,7 @@ def create_app() -> FastAPI:
                 "required": ["book_id"],
                 "additionalProperties": False,
             },
+            scope_resolver=agent_book_in_scope,
         ),
         lambda arguments: asdict(
             content.get_book_metadata(str(arguments["book_id"]), public_only=True)
@@ -442,6 +474,13 @@ def create_app() -> FastAPI:
             description="List books visible to the current staff data scope",
             permission="content.read",
             input_schema={"type": "object", "additionalProperties": False},
+            scope_resolver=lambda _arguments, context: (
+                context is not None
+                and any(
+                    platform.can_access(context.actor_id, "content.read", scope_type, scope_value)
+                    for scope_type, scope_value in context.data_scopes
+                )
+            ),
         ),
         lambda _arguments, context: [
             {
@@ -452,7 +491,7 @@ def create_app() -> FastAPI:
                 "visibility": book.visibility.value,
             }
             for book, metadata in content.list_all_books()
-            if platform.can_access(context.actor_id, "content.read", "ALL", "*")
+            if agent_book_in_scope({"book_id": book.id}, context)
         ],
     )
     agent_gateway.register(
@@ -503,12 +542,24 @@ def create_app() -> FastAPI:
 
             raise PermissionDenied("review submission is outside the staff data scope")
         record = review.decide(submission_id, context.actor_id, decision, actor_type="human")
+        verified = review.get_submission(submission_id)
         return {
             "id": record.id,
             "submission_id": record.submission_id,
             "decision": record.decision.value,
+            "status": verified.status.value,
             "execution_channel": "AGENT",
         }
+
+    def review_submission_in_scope(arguments: dict[str, Any], context: Any) -> bool:
+        submission_id = arguments.get("submission_id")
+        if not isinstance(submission_id, str) or context is None:
+            return False
+        return any(
+            item.id == submission_id
+            for scope_type, scope_value in context.data_scopes
+            for item in review.list_submissions_for_scope(scope_type, scope_value)
+        )
 
     agent_gateway.register(
         ToolResource(
@@ -528,6 +579,12 @@ def create_app() -> FastAPI:
                     },
                 },
             },
+            scope_resolver=review_submission_in_scope,
+            result_validator=lambda data, _arguments, _context: (
+                isinstance(data, dict)
+                and data.get("submission_id") == _arguments.get("submission_id")
+                and data.get("status") in {"APPROVED", "REJECTED", "RETURNED"}
+            ),
         ),
         decide_review_from_agent,
     )
@@ -653,6 +710,13 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         build_agent_gateway_router(
+            agent_gateway,
+            auth_required=True,
+            authorize_staff=staff_auth.authorize,
+        )
+    )
+    app.include_router(
+        build_agent_action_router(
             agent_gateway,
             auth_required=True,
             authorize_staff=staff_auth.authorize,

@@ -195,8 +195,9 @@ def _admin_collection_is_scoped(path: str) -> bool:
     return path in {
         "/admin/api/v1/reviews",
         "/admin/api/v1/agent/chat",
+        "/admin/api/v1/agent/messages",
         "/admin/api/v1/agent/harness-url",
         "/admin/api/v1/agent/mcp",
         "/admin/api/v1/agent/resources",
         "/admin/api/v1/agent/tools/execute",
-    }
+    } or path.startswith(("/admin/api/v1/agent/sessions", "/admin/api/v1/agent/actions/"))

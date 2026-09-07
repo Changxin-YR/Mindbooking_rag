@@ -1,6 +1,11 @@
+from __future__ import annotations
+
+import hashlib
 import inspect
+import json
 from collections.abc import Callable
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -34,6 +39,14 @@ class AgentAuditSink(Protocol):
 
 class AgentAuditRecorder(Protocol):
     def record(self, audit: AgentAudit) -> None: ...
+
+
+class PendingActionStore(Protocol):
+    def get(self, action_id: str) -> PendingAction | None: ...
+
+    def save(self, action: PendingAction) -> None: ...
+
+    def update(self, action: PendingAction) -> None: ...
 
 
 class AgentExecutionContext:
@@ -71,11 +84,37 @@ class PermissionDenied(AgentError):
 
 
 class ConfirmationRequired(AgentError):
-    pass
+    def __init__(self, message: str, *, pending_action: PendingAction | None = None) -> None:
+        super().__init__(message)
+        self.pending_action = pending_action
 
 
 class WriteToolRejected(AgentError):
     pass
+
+
+@dataclass
+class PendingAction:
+    id: str
+    actor_id: str
+    session_id: str
+    tool_name: str
+    arguments_hash: str
+    arguments_snapshot: dict[str, Any]
+    risk_level: str
+    impact_summary: str
+    created_at: datetime
+    expires_at: datetime
+    status: str = "PENDING"
+    confirmed_at: datetime | None = None
+    executed_at: datetime | None = None
+
+
+def _arguments_hash(arguments: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class InMemoryAgentAuditLog:
@@ -124,12 +163,15 @@ class AgentGateway:
         audit_recorder: AgentAuditRecorder | None = None,
         *,
         audit_sink: AgentAuditSink | None = None,
+        pending_store: PendingActionStore | None = None,
     ) -> None:
         if audit_recorder is not None and audit_sink is not None:
             raise ValueError("provide either audit_recorder or audit_sink")
         self._permission_checker = permission_checker
         self.audit_recorder = audit_sink or audit_recorder or InMemoryAgentAuditLog()
         self._tools: dict[str, tuple[ToolResource, AgentCallback]] = {}
+        self._pending_store = pending_store
+        self._pending: dict[str, PendingAction] = {}
 
     @property
     def permission_checker(self) -> AgentPermissionChecker:
@@ -147,8 +189,153 @@ class AgentGateway:
         return tuple(
             resource
             for resource, _ in self._tools.values()
-            if self._permission_checker.has_permission(actor_id, resource.permission)
+            if self._permission_checker.has_permission(actor_id, resource.effective_permission)
         )
+
+    def pending(self, action_id: str) -> PendingAction | None:
+        if self._pending_store is not None:
+            return self._pending_store.get(action_id)
+        return self._pending.get(action_id)
+
+    def _save_pending(self, action: PendingAction) -> None:
+        if self._pending_store is not None:
+            self._pending_store.save(action)
+        self._pending[action.id] = action
+
+    def _update_pending(self, action: PendingAction) -> None:
+        if self._pending_store is not None:
+            self._pending_store.update(action)
+        self._pending[action.id] = action
+
+    def cancel(self, action_id: str, *, actor_id: str, session_id: str) -> PendingAction:
+        action = self.pending(action_id)
+        if action is None or action.actor_id != actor_id or action.session_id != session_id:
+            raise PermissionDenied("pending action is not owned by this staff session")
+        if action.status != "PENDING":
+            return action
+        action.status = "CANCELLED"
+        self._update_pending(action)
+        self._audit(
+            AgentToolCall(
+                agent_id=f"agt_{session_id}",
+                actor_id=actor_id,
+                tool_name=action.tool_name,
+                arguments=action.arguments_snapshot,
+                session_id=session_id,
+            ),
+            self._tools[action.tool_name][0].effective_permission,
+            "CANCELLED",
+            "pending_action_cancelled",
+            risk_level=action.risk_level,
+            pending_action_id=action.id,
+        )
+        return action
+
+    def confirm(
+        self,
+        action_id: str,
+        *,
+        actor_id: str,
+        session_id: str,
+        confirmation_token: str | None = None,
+        request_id: str | None = None,
+    ) -> AgentToolResult:
+        action = self.pending(action_id)
+        if action is None or action.actor_id != actor_id or action.session_id != session_id:
+            raise PermissionDenied("pending action is not owned by this staff session")
+        now = datetime.now(UTC)
+        if action.status != "PENDING":
+            raise ConfirmationRequired(
+                "pending action is no longer executable", pending_action=action
+            )
+        if action.expires_at <= now:
+            action.status = "EXPIRED"
+            self._update_pending(action)
+            raise ConfirmationRequired("pending action has expired", pending_action=action)
+        expected = f"{action.id}:{action.arguments_hash}"
+        if confirmation_token is not None and confirmation_token != expected:
+            raise PermissionDenied("confirmation token does not match pending action")
+        resource, callback = self._tools[action.tool_name]
+        if not self._permission_checker.has_permission(actor_id, resource.effective_permission):
+            self._audit(
+                AgentToolCall(
+                    agent_id=f"agt_{session_id}",
+                    actor_id=actor_id,
+                    tool_name=action.tool_name,
+                    arguments=action.arguments_snapshot,
+                    session_id=session_id,
+                    pending_action_id=action.id,
+                ),
+                resource.effective_permission,
+                "DENIED",
+                "permission_revoked",
+                risk_level=action.risk_level,
+                pending_action_id=action.id,
+            )
+            raise PermissionDenied("agent actor no longer has tool permission")
+        call = AgentToolCall(
+            agent_id=f"agt_{session_id}",
+            actor_id=actor_id,
+            tool_name=action.tool_name,
+            arguments=dict(action.arguments_snapshot),
+            confirmation=True,
+            session_id=session_id,
+            request_id=request_id,
+            pending_action_id=action.id,
+            confirmation_token=confirmation_token or expected,
+        )
+        permission_values = getattr(self._permission_checker, "permissions_for", None)
+        scope_values = getattr(self._permission_checker, "scopes_for", None)
+        context = AgentExecutionContext(
+            actor_id=actor_id,
+            session_id=session_id,
+            request_id=request_id,
+            permissions=tuple(permission_values(actor_id)) if callable(permission_values) else (),
+            data_scopes=tuple(scope_values(actor_id)) if callable(scope_values) else (),
+        )
+        if callable(resource.scope_resolver):
+            try:
+                in_scope = resource.scope_resolver(call.arguments, context)
+            except PermissionDenied:
+                in_scope = False
+            if in_scope is False:
+                self._audit(
+                    call,
+                    resource.effective_permission,
+                    "DENIED",
+                    "data_scope_denied",
+                    risk_level=action.risk_level,
+                    pending_action_id=action.id,
+                )
+                raise PermissionDenied("agent resource is outside the staff data scope")
+        try:
+            data = self._invoke_write(resource, callback, call.arguments, context)
+        except Exception:
+            action.status = "FAILED"
+            self._update_pending(action)
+            self._audit(
+                call,
+                resource.effective_permission,
+                "FAILED",
+                "callback_failed",
+                risk_level=action.risk_level,
+                pending_action_id=action.id,
+            )
+            raise
+        action.status = "EXECUTED"
+        action.confirmed_at = now
+        action.executed_at = datetime.now(UTC)
+        self._update_pending(action)
+        self._audit(
+            call,
+            resource.effective_permission,
+            "SUCCESS",
+            None,
+            result_summary="tool_result_verified",
+            risk_level=action.risk_level,
+            pending_action_id=action.id,
+        )
+        return AgentToolResult(tool_name=resource.name, data=data)
 
     def execute(
         self,
@@ -162,32 +349,61 @@ class AgentGateway:
             raise ToolNotFound("tool resource is not registered")
 
         resource, callback = registered
-        if not self._permission_checker.has_permission(call.actor_id, resource.permission):
+        if context is not None and context.actor_id != call.actor_id:
+            self._audit(call, resource.effective_permission, "DENIED", "context_actor_mismatch")
+            raise PermissionDenied("agent actor is not the authenticated staff actor")
+        if not self._permission_checker.has_permission(
+            call.actor_id, resource.effective_permission
+        ):
             self._audit(
                 call,
-                resource.permission,
+                resource.effective_permission,
                 "DENIED",
                 "permission_denied",
                 risk_level="HIGH" if resource.high_risk else "LOW",
             )
             raise PermissionDenied("agent actor lacks tool permission")
 
-        if not resource.read_only and (resource.high_risk or resource.requires_confirmation):
+        scope_resolver = resource.scope_resolver
+        if callable(scope_resolver):
+            try:
+                scope_ok = scope_resolver(call.arguments, context)
+            except PermissionDenied:
+                scope_ok = False
+            if scope_ok is False:
+                self._audit(
+                    call,
+                    resource.effective_permission,
+                    "DENIED",
+                    "data_scope_denied",
+                    risk_level=resource.risk_level,
+                )
+                raise PermissionDenied("agent resource is outside the staff data scope")
+
+        if not resource.read_only and (
+            resource.high_risk
+            or resource.requires_confirmation
+            or resource.confirmation_policy != "NONE"
+        ):
+            action = self._pending_action(call, resource)
             self._audit(
                 call,
-                resource.permission,
-                "REJECTED",
+                resource.effective_permission,
+                "PENDING",
                 "confirmation_required",
-                risk_level="HIGH" if resource.high_risk else "LOW",
+                risk_level=action.risk_level,
+                pending_action_id=action.id,
             )
-            raise ConfirmationRequired("a verified human confirmation is required for this write")
+            raise ConfirmationRequired(
+                "a verified human confirmation is required for this write", pending_action=action
+            )
 
         try:
-            data = _invoke_callback(callback, call.arguments, context)
+            data = self._invoke_write(resource, callback, call.arguments, context)
         except Exception:
             self._audit(
                 call,
-                resource.permission,
+                resource.effective_permission,
                 "FAILED",
                 "callback_failed",
                 risk_level="HIGH" if resource.high_risk else "LOW",
@@ -196,13 +412,47 @@ class AgentGateway:
 
         self._audit(
             call,
-            resource.permission,
+            resource.effective_permission,
             "SUCCESS",
             None,
             result_summary="tool_result_returned",
             risk_level="HIGH" if resource.high_risk else "LOW",
         )
         return AgentToolResult(tool_name=resource.name, data=data)
+
+    def _pending_action(self, call: AgentToolCall, resource: ToolResource) -> PendingAction:
+        # Direct unit callers may omit a session; HTTP/MCP callers always bind one
+        # to authenticated Staff claims before reaching this method.
+        session_id = call.session_id or f"legacy-{call.actor_id}"
+        action = PendingAction(
+            id=f"ACT_{uuid4().hex}",
+            actor_id=call.actor_id,
+            session_id=session_id,
+            tool_name=resource.name,
+            arguments_hash=_arguments_hash(call.arguments),
+            arguments_snapshot=dict(call.arguments),
+            risk_level=resource.risk_level
+            if resource.risk_level != "LOW"
+            else ("HIGH" if resource.high_risk else "MEDIUM"),
+            impact_summary=f"Execute {resource.name}",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+        self._save_pending(action)
+        return action
+
+    @staticmethod
+    def _invoke_write(
+        resource: ToolResource,
+        callback: AgentCallback,
+        arguments: dict[str, Any],
+        context: AgentExecutionContext | None,
+    ) -> Any:
+        data = _invoke_callback(callback, arguments, context)
+        validator = resource.result_validator
+        if callable(validator) and not bool(validator(data, arguments, context)):
+            raise AgentError("tool result verification failed")
+        return data
 
     def _audit(
         self,
@@ -213,6 +463,7 @@ class AgentGateway:
         *,
         result_summary: str | None = None,
         risk_level: str = "LOW",
+        pending_action_id: str | None = None,
     ) -> None:
         audit = AgentAudit(
             id=f"AGT_{uuid4().hex}",
@@ -231,6 +482,8 @@ class AgentGateway:
             request_id=getattr(call, "request_id", None),
             confirmed=call.confirmation,
             risk_level=risk_level,
+            pending_action_id=pending_action_id,
+            resource_scope=(),
         )
         append = getattr(self.audit_recorder, "append", None)
         if callable(append):
@@ -263,6 +516,7 @@ __all__ = [
     "AgentPermissionChecker",
     "ConfirmationRequired",
     "InMemoryAgentAuditLog",
+    "PendingActionStore",
     "PermissionDenied",
     "ToolNotFound",
     "WriteToolRejected",

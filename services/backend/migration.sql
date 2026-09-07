@@ -1773,3 +1773,28 @@ CREATE TABLE reading_preferences (
 
 UPDATE alembic_version SET version_num='0039_reader_preferences' WHERE alembic_version.version_num = '0038_account_profile';
 
+-- Running upgrade 0039_reader_preferences -> 0040_agent_pending_actions
+
+CREATE TABLE agent_pending_actions (
+    id VARCHAR(128) NOT NULL,
+    actor_id VARCHAR(64) NOT NULL,
+    session_id VARCHAR(128) NOT NULL,
+    tool_name VARCHAR(128) NOT NULL,
+    arguments_hash VARCHAR(64) NOT NULL,
+    arguments_snapshot TEXT NOT NULL,
+    risk_level VARCHAR(16) NOT NULL,
+    impact_summary VARCHAR(255) NOT NULL,
+    created_at DATETIME NOT NULL,
+    expires_at DATETIME NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    confirmed_at DATETIME,
+    executed_at DATETIME,
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX ix_agent_pending_actions_actor_status ON agent_pending_actions (actor_id, status);
+
+CREATE INDEX ix_agent_pending_actions_expires ON agent_pending_actions (expires_at);
+
+UPDATE alembic_version SET version_num='0040_agent_pending_actions' WHERE alembic_version.version_num = '0039_reader_preferences';
+

@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Protocol, cast
 from urllib.parse import parse_qs, urlsplit
 
@@ -25,6 +26,44 @@ class HarnessSession(Protocol):
     def run(self, prompt: str, *, session_id: str) -> Any: ...
 
     def close(self) -> None: ...
+
+
+class AgentModelPort(Protocol):
+    """Minimal model boundary used by the Agent runtime and deterministic tests."""
+
+    def run(self, prompt: str, *, session_id: str) -> Any: ...
+
+    def close(self) -> None: ...
+
+
+class DeepSeekHarnessAdapter:
+    """Adapter around the optional DeepSeek Harness SDK."""
+
+    def __init__(self, factory: Any, **kwargs: Any) -> None:
+        self._session = factory(**kwargs)
+
+    def run(self, prompt: str, *, session_id: str) -> Any:
+        return self._session.run(prompt, session_id=session_id)
+
+    def close(self) -> None:
+        close = getattr(self._session, "close", None)
+        if callable(close):
+            close()
+
+
+class FakeAgentModelAdapter:
+    """Deterministic adapter for CI; it never requires live model credentials."""
+
+    def __init__(self, response: str = "已收到请求。请提供要操作的对象或编号。") -> None:
+        self.response = response
+        self.prompts: list[tuple[str, str]] = []
+
+    def run(self, prompt: str, *, session_id: str) -> Any:
+        self.prompts.append((session_id, prompt))
+        return SimpleNamespace(final_response=self.response, finish_reason="completed")
+
+    def close(self) -> None:
+        return None
 
 
 _WEB_URL_PATTERN = re.compile(r"\bdsh web:\s+(https?://[^\s()]+)")
@@ -417,6 +456,8 @@ class HarnessSessionManager:
         return self.start_web(actor_id=actor_id, session_id=session_id, access_token=access_token)
 
     def _create(self, actor_id: str, session_id: str, access_token: str) -> HarnessSession:
+        if self.runtime_mode.lower() in {"fake", "test", "deterministic"} and self._factory is None:
+            return cast(HarnessSession, FakeAgentModelAdapter())
         factory = self._factory or _load_harness_factory()
         home = self.dsh_home / _safe(actor_id) / _safe(session_id)
         home.mkdir(parents=True, exist_ok=True)
@@ -427,7 +468,8 @@ class HarnessSessionManager:
         }
         return cast(
             HarnessSession,
-            factory(
+            DeepSeekHarnessAdapter(
+                factory,
                 dsh_home=str(home),
                 cwd=str(self.project_root),
                 provider=self.provider,
@@ -504,4 +546,10 @@ def _load_harness_factory() -> Any:
         raise HarnessRuntimeError("AGENT_RUNTIME_UNAVAILABLE") from exc
 
 
-__all__ = ["HarnessRuntimeError", "HarnessSessionManager"]
+__all__ = [
+    "AgentModelPort",
+    "DeepSeekHarnessAdapter",
+    "FakeAgentModelAdapter",
+    "HarnessRuntimeError",
+    "HarnessSessionManager",
+]
