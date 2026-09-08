@@ -4,9 +4,9 @@
 
 ## 结论
 
-**B+：有条件通过。**
+**A：通过。**
 
-Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真实 MySQL 等价链和 CI 均已通过。唯一阻塞项是未提供 DeepSeek live credential，因此 LIVE LLM 不能伪造为 PASS。真实支付、银行、税务 Provider 认证属于本作品集项目范围外，不降低项目级验收等级。
+Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真实 MySQL 等价链、CI 和受控 Live DeepSeek 验收均已通过。真实支付、银行、税务 Provider 认证属于本作品集项目范围外。
 
 ## 变更基线
 
@@ -15,11 +15,11 @@ Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真�
 - CI 修复提交：55e4090 fix(ci): restore reproducible quality gates
 - Agent/管理系统实现提交：5203fd4（含前序 94d8dd9、67beaed）
 - 环境：Windows、Python 3.x、Node 24、pnpm 11.22.0；时间：2026-09-08（Asia/Shanghai）
-- Validated implementation SHA：`90a1ab0ffabdaf0788843c256bfc51febd50af28`
-- Final documentation commit：已推送至 PR #1 当前 head（docs-only；不改变上述实现证据）
-- 远端 PR head：以 PR #1 当前 head 为准
+- Validated implementation SHA：本次 Live 验收提交生成后记录
+- Final documentation commit：本次 Live 验收提交生成后记录
+- 远端 PR head：本次 push 后记录
 - PR：<https://github.com/Changxin-YR/Mindbooking_rag/pull/1>
-- Latest passing CI（validated implementation）：<https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708>
+- Latest passing CI：本次 push 后记录 Exact-SHA CI run
 - Docker Compose：MySQL、Backend、Admin、Reader、Writer、Harness、OpenSearch、Redis、RabbitMQ、ClickHouse、MinIO、Nginx 全部 healthy；Alembic head=`0042_agent_audit_pending_action`
 
 ## 已修复
@@ -45,10 +45,10 @@ Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真�
 
 | Gate | 命令/场景 | 结果 |
 | --- | --- | --- |
-| Backend | python -m pytest -q | 357 passed, 0 failed, 0 skipped |
+| Backend | python -m pytest -q | 362 passed, 0 failed, 0 skipped |
 | Formatting | python -m ruff format --check src tests alembic | PASS |
 | Lint | python -m ruff check src tests alembic | PASS |
-| Types | python -m mypy src | PASS, 146 source files |
+| Types | python -m mypy src | PASS, 147 source files |
 | Alembic | Compose MySQL `alembic upgrade head` | PASS, head `0042_agent_audit_pending_action` |
 | Frontend tests | pnpm -r test | PASS |
 | Frontend typecheck | pnpm -r typecheck | PASS |
@@ -57,6 +57,7 @@ Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真�
 | Browser smoke | local FastAPI + Admin Vite + Playwright: login → Agent session → query | PASS |
 | Compose QA | `qa_compose_smoke.py`, `qa_v12_smoke.py`, `qa_writer_editor_smoke.py`, `qa_sql_commercial_e2e.py`, `qa_mysql_concurrency.py`, `qa_mysql_load.py`, `qa_role_e2e.py`, `qa_harness_e2e.py`, `qa_advanced_workflows.py` | ALL PASS |
 | Agent MySQL E2E | `scripts/qa_agent_mysql_e2e.py` | PASS：人工/Agent review 语义相等；PendingAction `EXECUTED`；SQL Agent Audit 已关联 |
+| Live DeepSeek | `LIVE_LLM=1 python scripts/qa_agent_live_deepseek.py` | PASS：官方 provider/model、HTTP 200、真实生成、查询/多轮/PendingAction/确认/RBAC/DataScope/Injection/异常分类 |
 | Frontend | `pnpm -r test`、`pnpm -r typecheck`、`pnpm -r build` | PASS |
 
 ## 第二轮 Exact-SHA CI
@@ -64,10 +65,10 @@ Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真�
 | Workflow | Run / Job | 结论 |
 | --- | --- | --- |
 | Foundation | [run 34154842708](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708) / Foundation configuration | PASS |
-| Backend | [run 34154842708](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708) / Backend tests and quality | PASS (`357 passed`) |
+| Backend | [run 34154842708](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708) / Backend tests and quality | PASS (`362 passed`) |
 | Frontend | [run 34154842708](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708) / Frontend tests and builds | PASS |
 
-本轮后端测试共 357 个通过，无 skip；pytest 仅有第三方弃用警告。
+本轮后端测试共 362 个通过，无 skip；pytest 仅有第三方弃用警告。
 
 ## 关键安全与业务不变量
 
@@ -83,7 +84,7 @@ Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真�
 
 | 项目 | 状态 | 证据/原因 |
 | --- | --- | --- |
-| LIVE_LLM | BLOCKED_BY_CREDENTIAL | 当前环境未提供 DeepSeek API/Harness credential；Fake adapter、Harness 集成和安全契约已通过 |
+| LIVE_LLM | PASS | `provider=deepseek-official`、`model=deepseek-v4-flash`、HTTP 200、真实响应、延迟约 917 ms；Live 场景全部通过 |
 | MySQL Agent E2E | PASS | `scripts/qa_agent_mysql_e2e.py` 通过人工/Agent 审核等价、PendingAction/Audit 持久化核对 |
 | Compose/Browser full role E2E | PASS | Compose smoke、Harness browser E2E、Reader/Writer/Admin builds 全部通过 |
 | Production Provider Certification | OUT OF SCOPE | Portfolio / resume project; no real-money production operation |
@@ -96,6 +97,6 @@ Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真�
 - Gate 1 管理系统：API/UI/真实 Compose MySQL/SQL PASS。
 - Gate 2 Agent：Fake NLU、Tool、授权写、结果验证、审计 PASS。
 - Gate 3 权限安全：RBAC、DataScope、actor 防伪、注入拒绝、确认重放保护 PASS。
-- Gate 4 真实业务：人工、Agent、Hybrid、真实 MySQL Agent 等价链 PASS；Live DeepSeek 仍待 credential。
+- Gate 4 真实业务：人工、Agent、Hybrid、真实 MySQL Agent 等价链 PASS；Live DeepSeek PASS。
 
-当前不存在已复现的 P0/P1 代码缺陷。`Platform Engineering=A`、`Agent Security=A`、`Agent Business Execution=A`；`LIVE DeepSeek=BLOCKED_BY_CREDENTIAL`。因此 Portfolio Acceptance 总等级为 **B+**。生产支付、银行、税务 Provider Certification 明确为 **OUT OF SCOPE**。
+当前不存在已复现的 P0/P1 代码缺陷。`Platform Engineering=A`、`Agent Security=A`、`Agent Business Execution=A`、`LIVE DeepSeek=PASS`、`Sandbox Payment/Payout=PASS`；`Production Provider Certification=OUT OF SCOPE`。因此 Portfolio Acceptance 总等级为 **A：通过**。

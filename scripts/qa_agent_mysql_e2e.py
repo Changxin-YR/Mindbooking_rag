@@ -317,10 +317,11 @@ def run(base: str, staff_code: str, staff_password: str) -> None:
             pending_status_db = cursor.fetchone()[0]
             cursor.execute(
                 "SELECT outcome, pending_action_id FROM agent_audit_events "
-                "WHERE pending_action_id=%s ORDER BY occurred_at DESC LIMIT 1",
+                "WHERE pending_action_id=%s ORDER BY occurred_at DESC, id DESC",
                 (action["id"],),
             )
-            audit = cursor.fetchone()
+            audit_rows = cursor.fetchall()
+            audit = next((row for row in audit_rows if row[0] == "SUCCESS"), None)
         if pending_status_db != "EXECUTED" or not audit or audit[0] != "SUCCESS":
             raise RuntimeError(
                 f"Agent confirmation facts not durable: {pending_status_db}, {audit}"

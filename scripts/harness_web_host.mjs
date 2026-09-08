@@ -59,15 +59,16 @@ async function pruneIdleInstances() {
 
 function patchText() {
   return [
-    '- id: novel-platform-agent-tools',
-    "  name: '@deepseek-ai/dsh-mcp-client'",
-    '  config:',
-    '    serverName: novel_platform',
-    '    transport: streamable-http',
-    `    url: '${backendUrl}/admin/api/v1/agent/mcp'`,
-    '    headers:',
-    "      Authorization: !!js '`Bearer ${process.env.AGENT_ACCESS_TOKEN}`'",
-    "      X-Agent-Session: !!js 'process.env.AGENT_SESSION_ID'",
+    '- insert:',
+    '    - id: novel-platform-agent-tools',
+    "      name: '@deepseek-ai/dsh-mcp-client'",
+    '      config:',
+    '        serverName: novel_platform',
+    '        transport: streamable-http',
+    `        url: '${backendUrl}/admin/api/v1/agent/mcp'`,
+    '        headers:',
+    "          Authorization: !!js '`Bearer ${process.env.AGENT_ACCESS_TOKEN}`'",
+    "          X-Agent-Session: !!js 'process.env.AGENT_SESSION_ID'",
     '',
   ].join('\n')
 }

@@ -511,11 +511,25 @@ def create_app() -> FastAPI:
         ),
         lambda _arguments, context: [
             asdict(item)
-            for scope_type, scope_value in context.data_scopes
-            for item in review.list_submissions_for_scope(scope_type, scope_value)
+            for item in review_submissions_in_scope(context)
             if item.status.value == "PENDING"
         ],
     )
+
+    def review_submissions_in_scope(context: Any) -> list[Any]:
+        if context is None:
+            return []
+        visible: dict[str, Any] = {}
+        for scope_type, scope_value in context.data_scopes:
+            if scope_type.upper() == "CUSTOM":
+                book_id = scope_value.removeprefix("BOOK:")
+                submissions = [
+                    item for item in review.list_submissions() if item.book_id == book_id
+                ]
+            else:
+                submissions = review.list_submissions_for_scope(scope_type, scope_value)
+            visible.update({item.id: item for item in submissions})
+        return list(visible.values())
 
     def decide_review_from_agent(arguments: dict[str, Any], context: Any) -> dict[str, object]:
         if context is None or not platform.has_permission(context.actor_id, "review.decide"):
@@ -540,11 +554,7 @@ def create_app() -> FastAPI:
             ReviewDecision.RETURN_FOR_CHANGES,
         }:
             raise ValueError("unsupported review decision")
-        visible_ids = {
-            item.id
-            for scope_type, scope_value in context.data_scopes
-            for item in review.list_submissions_for_scope(scope_type, scope_value)
-        }
+        visible_ids = {item.id for item in review_submissions_in_scope(context)}
         if submission_id not in visible_ids:
             from novel_platform.modules.agent.application import PermissionDenied
 
@@ -563,11 +573,7 @@ def create_app() -> FastAPI:
         submission_id = arguments.get("submission_id")
         if not isinstance(submission_id, str) or context is None:
             return False
-        return any(
-            item.id == submission_id
-            for scope_type, scope_value in context.data_scopes
-            for item in review.list_submissions_for_scope(scope_type, scope_value)
-        )
+        return any(item.id == submission_id for item in review_submissions_in_scope(context))
 
     agent_gateway.register(
         ToolResource(

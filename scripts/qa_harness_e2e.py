@@ -47,7 +47,7 @@ def main() -> None:
             )
             admin.goto(
                 "http://127.0.0.1:8080/admin/?view=AI%20%E8%BF%90%E8%90%A5%E5%8A%A9%E6%89%8B",
-                wait_until="networkidle",
+                wait_until="domcontentloaded",
             )
             frame = admin.locator("iframe.native-harness-frame")
             frame.wait_for(timeout=15_000)

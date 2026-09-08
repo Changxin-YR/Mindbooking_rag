@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from novel_platform.main import create_app
@@ -65,7 +67,9 @@ def test_agent_review_decision_executes_for_assigned_staff(monkeypatch) -> None:
     )
 
     assert pending["error"]["code"] == -32004
-    action = pending["error"]["message"]["pending_action"]
+    assert isinstance(pending["error"]["message"], str)
+    assert pending["error"]["data"]["code"] == "AGENT_CONFIRMATION_REQUIRED"
+    action = json.loads(pending["error"]["message"])["pending_action"]
     confirmed = client.post(
         f"/admin/api/v1/agent/actions/{action['id']}/confirm",
         headers=headers,
@@ -95,6 +99,35 @@ def test_agent_review_decision_rejects_unassigned_submission(monkeypatch) -> Non
 
     assert result["error"]["code"] == -32003
     assert client.app.state.review_service.get_submission(submission_id).status.value == "PENDING"
+
+
+def test_agent_review_decision_honors_custom_book_scope(monkeypatch) -> None:
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    client = TestClient(create_app())
+    staff = client.app.state.platform.create_staff("custom-reviewer", "review")
+    app = client.app
+    for permission in ("agent.execute", "review.read", "review.decide"):
+        app.state.platform.grant_permission(staff.id, permission)
+    content = app.state.content_service
+    review = app.state.review_service
+    book = content.create_book("agent-review-author", "Custom scope review book")
+    volume = content.create_volume(book.id, "Volume", 1)
+    chapter = content.create_chapter(volume.id, "Chapter", CommercialPolicy.FREE)
+    version = content.create_chapter_version(chapter.id, content.save_draft(chapter.id, "body").id)
+    submission_id = review.submit_first_listing(book.id, [version.id]).id
+    submission = app.state.review_service.get_submission(submission_id)
+    app.state.platform.grant_data_scope(staff.id, "CUSTOM", f"BOOK:{submission.book_id}")
+    headers = _staff_headers(client, "custom-reviewer", staff.id)
+
+    pending = _mcp_call(
+        client,
+        headers,
+        name="review.decide",
+        arguments={"submission_id": submission_id, "decision": "REJECT"},
+    )
+
+    assert pending["error"]["code"] == -32004
+    assert app.state.review_service.get_submission(submission_id).status.value == "PENDING"
 
 
 def test_agent_http_write_exposes_pending_action_and_confirms(monkeypatch) -> None:

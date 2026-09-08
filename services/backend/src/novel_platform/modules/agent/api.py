@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -818,18 +819,24 @@ def build_agent_runtime_router(
                 }
             except (ToolNotFound, ConfirmationRequired, WriteToolRejected) as exc:
                 detail: Any = str(exc)
+                error_data: dict[str, Any] | None = None
                 if isinstance(exc, ConfirmationRequired) and exc.pending_action is not None:
-                    detail = {
+                    error_data = {
                         "code": "AGENT_CONFIRMATION_REQUIRED",
                         "message": str(exc),
                         "pending_action": PendingActionResponse.model_validate(
                             exc.pending_action
                         ).model_dump(mode="json"),
                     }
+                    detail = json.dumps(error_data, ensure_ascii=False)
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "error": {"code": -32004, "message": detail},
+                    "error": {
+                        "code": -32004,
+                        "message": detail,
+                        **({"data": error_data} if error_data is not None else {}),
+                    },
                 }
             except Exception:  # noqa: BLE001 - hide adapter internals from model
                 return {
@@ -837,8 +844,6 @@ def build_agent_runtime_router(
                     "id": request_id,
                     "error": {"code": -32000, "message": "tool execution failed"},
                 }
-            import json
-
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,
