@@ -15,11 +15,10 @@ Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真�
 - CI 修复提交：55e4090 fix(ci): restore reproducible quality gates
 - Agent/管理系统实现提交：5203fd4（含前序 94d8dd9、67beaed）
 - 环境：Windows、Python 3.x、Node 24、pnpm 11.22.0；时间：2026-09-08（Asia/Shanghai）
-- Validated implementation SHA：本次 Live 验收提交生成后记录
-- Final documentation commit：本次 Live 验收提交生成后记录
-- 远端 PR head：本次 push 后记录
-- PR：<https://github.com/Changxin-YR/Mindbooking_rag/pull/1>
-- Latest passing CI：本次 push 后记录 Exact-SHA CI run
+- Validated Live Acceptance SHA：c35c7b0e020e0d58f386ca17bb7afcf13864c7e9
+- Live Acceptance Commit：`test(agent): certify live DeepSeek acceptance`
+- PR：#1（<https://github.com/Changxin-YR/Mindbooking_rag/pull/1>）
+- Final Acceptance CI：34230223413
 - Docker Compose：MySQL、Backend、Admin、Reader、Writer、Harness、OpenSearch、Redis、RabbitMQ、ClickHouse、MinIO、Nginx 全部 healthy；Alembic head=`0042_agent_audit_pending_action`
 
 ## 已修复
@@ -69,6 +68,14 @@ Portfolio Acceptance 的管理系统、Agent 安全边界、授权写入、真�
 | Frontend | [run 34154842708](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34154842708) / Frontend tests and builds | PASS |
 
 本轮后端测试共 362 个通过，无 skip；pytest 仅有第三方弃用警告。
+
+## 最终 Live DeepSeek 验收 CI
+
+| Workflow | Run / Job | 结论 |
+| --- | --- | --- |
+| Foundation | [run 34230223413](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34230223413) / Foundation configuration | PASS |
+| Backend | [run 34230223413](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34230223413) / Backend tests and quality | PASS（362 passed） |
+| Frontend | [run 34230223413](https://github.com/Changxin-YR/Mindbooking_rag/actions/runs/34230223413) / Frontend tests and builds | PASS |
 
 ## 关键安全与业务不变量
 
