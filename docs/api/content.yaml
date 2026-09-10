@@ -80,6 +80,20 @@ paths:
       responses:
         '201':
           description: Fixed-version review submission
+  /writer/api/v1/books/{book_id}/chapter-submissions:
+    post:
+      operationId: writer_submit_chapter_update
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FirstListingRequest'
+      responses:
+        '201':
+          description: Fixed chapter-update review submission
   /admin/api/v1/reviews:
     get:
       operationId: admin_list_review_submissions
@@ -104,6 +118,32 @@ paths:
       responses:
         '201':
           description: Structured review decision
+  /admin/api/v1/books/{book_id}/lifecycle:
+    patch:
+      operationId: admin_update_book_lifecycle
+      parameters:
+        - $ref: '#/components/parameters/BookId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [lifecycle]
+              properties:
+                lifecycle:
+                  type: string
+                  enum: [DRAFT, SERIALIZING, PAUSED, COMPLETION_PENDING, COMPLETED]
+      responses:
+        '200':
+          description: Updated lifecycle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminBookResponse'
+        '403':
+          description: Staff operation.write permission required
   /api/v1/books/{book_id}/progress:
     get:
       operationId: reader_get_progress
@@ -191,13 +231,21 @@ components:
         title: {type: string}
         lifecycle: {type: string}
         visibility: {type: string}
+    AdminBookResponse:
+      allOf:
+        - $ref: '#/components/schemas/BookResponse'
+        - type: object
+          required: [author_id]
+          properties:
+            author_id: {type: string}
     ChapterResponse:
       type: object
       additionalProperties: false
-      required: [id, book_id, title, content, commercial_policy, access]
+      required: [id, book_id, number, title, content, commercial_policy, access]
       properties:
         id: {type: string}
         book_id: {type: string}
+        number: {type: integer}
         title: {type: string}
         content: {type: string}
         commercial_policy: {type: string}
@@ -205,10 +253,11 @@ components:
     ChapterResponse:
       type: object
       additionalProperties: false
-      required: [id, book_id, title, content, commercial_policy, access]
+      required: [id, book_id, number, title, content, commercial_policy, access]
       properties:
         id: {type: string}
         book_id: {type: string}
+        number: {type: integer}
         title: {type: string}
         content: {type: string}
         commercial_policy: {type: string}

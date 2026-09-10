@@ -59,6 +59,19 @@ def build_support_router(
         )
         return TicketResponse.model_validate(ticket, from_attributes=True)
 
+    @router.get(
+        "/tickets", response_model=list[TicketResponse], operation_id="reader_list_support_tickets"
+    )
+    def list_tickets(
+        account_id: str,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> list[TicketResponse]:
+        require_account_access(session, account_id, required=auth_required)
+        return [
+            TicketResponse.model_validate(ticket, from_attributes=True)
+            for ticket in service.list_tickets(account_id)
+        ]
+
     @router.post("/tickets/{ticket_id}/resolve", response_model=TicketResponse)
     def resolve_ticket(ticket_id: str, request: Request) -> TicketResponse:
         if auth_required:

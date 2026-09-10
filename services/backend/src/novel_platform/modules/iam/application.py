@@ -6,13 +6,18 @@ from secrets import token_bytes
 
 from novel_platform.core.auth import SessionSigner
 from novel_platform.modules.iam.domain import (
+    AccountLoginNameTakenError,
     AccountRealNameLink,
     InvalidIdentityDocumentError,
+    InvalidLoginNameError,
+    InvalidNicknameError,
     InvalidPhoneError,
     LoginIdentity,
     PlatformAccount,
     RealNameSlotStatus,
     identity_document_fingerprint,
+    normalize_login_name,
+    normalize_nickname,
     normalize_phone,
 )
 from novel_platform.modules.iam.repository import IdentityRepository
@@ -43,6 +48,9 @@ class AccountRegistration:
     account_id: str
     identity_id: str
     phone: str
+    account_no: str
+    nickname: str | None
+    login_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +79,38 @@ class IdentityApplication:
         self.repository.link_account(identity.id, account.id)
         if password is not None:
             self.set_password(account.id, password)
-        return AccountRegistration(account.id, identity.id, normalized_phone)
+        return AccountRegistration(
+            account.id,
+            identity.id,
+            normalized_phone,
+            account.account_no,
+            account.nickname,
+            account.login_name,
+        )
+
+    def profile_for_account(self, account_id: str) -> PlatformAccount:
+        account = self.repository.account_for_id(account_id)
+        if account is None:
+            raise AccountNotFoundError("account does not exist")
+        return account
+
+    def phone_for_account(self, account_id: str) -> str | None:
+        self.profile_for_account(account_id)
+        return self.repository.phone_for_account(account_id)
+
+    def update_profile(
+        self,
+        account_id: str,
+        *,
+        nickname: str | None = None,
+        login_name: str | None = None,
+    ) -> PlatformAccount:
+        self.profile_for_account(account_id)
+        normalized_nickname = normalize_nickname(nickname) if nickname is not None else None
+        normalized_login_name = normalize_login_name(login_name) if login_name is not None else None
+        return self.repository.update_account_profile(
+            account_id, nickname=normalized_nickname, login_name=normalized_login_name
+        )
 
     def set_password(self, account_id: str, password: str) -> None:
         if not isinstance(password, str) or len(password) < 8:
@@ -142,6 +181,7 @@ class IdentityApplication:
 
 __all__ = [
     "AccountAlreadyRealNamedError",
+    "AccountLoginNameTakenError",
     "AccountNotFoundError",
     "AccountRegistration",
     "AuthenticatedSession",
@@ -149,6 +189,8 @@ __all__ = [
     "IdentityNotFoundError",
     "InvalidCredentialsError",
     "InvalidIdentityDocumentError",
+    "InvalidLoginNameError",
+    "InvalidNicknameError",
     "InvalidPhoneError",
     "RealNameSlotLimitError",
 ]

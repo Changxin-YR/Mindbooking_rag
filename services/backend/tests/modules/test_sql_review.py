@@ -164,6 +164,27 @@ def test_sql_review_submission_and_approval_survive_service_rebuild() -> None:
     assert rebuilt_again.content.get_chapter(version.chapter_id).published_version_id == version.id
 
 
+def test_sql_chapter_update_requires_public_book_and_publishes_after_approval() -> None:
+    review, content = _review()
+    book, first = _fixed_version(content, "Public")
+    content.publish_fixed_versions(book.id, [first.id])
+    chapter = content.get_chapter(first.chapter_id)
+    second = content.create_chapter_version(
+        chapter.id, content.save_draft(chapter.id, "updated").id
+    )
+
+    submission = review.submit_chapter_update(book.id, [second.id])
+
+    assert submission.submission_type == "CHAPTER_UPDATE"
+    assert content.get_book(book.id).visibility is BookVisibility.PUBLIC
+    assert content.get_chapter(chapter.id).published_version_id == first.id
+
+    review.decide(submission.id, "reviewer-1", ReviewDecision.APPROVE)
+
+    assert content.get_book(book.id).visibility is BookVisibility.PUBLIC
+    assert content.get_chapter(chapter.id).published_version_id == second.id
+
+
 def test_sql_review_validates_fixed_versions_before_persisting() -> None:
     review, content = _review()
     first_book, first_version = _fixed_version(content, "Book 1")

@@ -1,10 +1,20 @@
 """HTTP boundary for configurable membership and community commercial facts."""
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 from novel_platform.core.auth import SessionClaims
@@ -14,6 +24,7 @@ from novel_platform.core.http_auth import (
     require_staff_session,
 )
 from novel_platform.modules.membership.domain import TicketType
+from novel_platform.modules.payment import ProviderEvent, ProviderStatus, validate_event_freshness
 from novel_platform.modules.wallet.api import _valid_callback_signature
 
 
@@ -104,6 +115,44 @@ class MembershipPaymentCallbackRequest(BaseModel):
     provider: str = Field(min_length=1)
     event_id: str = Field(min_length=1)
     payment_no: str = Field(min_length=1)
+
+
+class MembershipProviderEventRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1)
+    event_type: str = Field(min_length=1)
+    event_id: str = Field(min_length=1)
+    reference_id: str = Field(min_length=1)
+    provider_transaction_id: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+    amount_cents: int = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    occurred_at: datetime
+    available_at: datetime
+    signature: str = Field(min_length=1)
+
+
+class MembershipSandboxSimulationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str = Field(min_length=1)
+    payment_no: str = Field(min_length=1)
+    status: ProviderStatus = ProviderStatus.SUCCESS
+    delay_seconds: int = Field(default=0, ge=0)
+    duplicate: bool = False
+
+
+class MembershipSandboxSimulationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payment_no: str
+    order_id: str | None = None
+    provider: str
+    event_id: str
+    status: str
+    processed: bool
+    available_at: datetime
 
 
 def build_membership_router(
@@ -238,6 +287,8 @@ def build_membership_router(
             "channel": order.channel,
             "price_cents": order.price_cents,
             "status": order.status,
+            "provider": getattr(order, "provider", None),
+            "checkout_url": getattr(order, "checkout_url", None),
         }
 
     @router.post("/api/v1/membership/payments/callback")
@@ -266,6 +317,113 @@ def build_membership_router(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"order_id": str(order_id), "status": "PAID"}
+
+    @router.post("/api/v1/membership/payments/provider-callback")
+    def membership_provider_callback(
+        payload: MembershipProviderEventRequest,
+    ) -> dict[str, str]:
+        try:
+            event = ProviderEvent(
+                provider=payload.provider,
+                event_type=payload.event_type,
+                event_id=payload.event_id,
+                reference_id=payload.reference_id,
+                provider_transaction_id=payload.provider_transaction_id,
+                status=ProviderStatus(payload.status),
+                amount_cents=payload.amount_cents,
+                currency=payload.currency,
+                occurred_at=payload.occurred_at,
+                available_at=payload.available_at,
+                signature=payload.signature,
+            )
+            validate_event_freshness(event, max_skew_seconds=callback_max_skew_seconds)
+            order_id = invoke("handle_payment_provider_event", event)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        return {"order_id": str(order_id), "status": event.status.value}
+
+    @router.post(
+        "/api/v1/membership/payments/sandbox/simulate",
+        response_model=MembershipSandboxSimulationResponse,
+        operation_id="simulate_sandbox_membership_payment",
+    )
+    def simulate_sandbox_membership_payment(
+        payload: MembershipSandboxSimulationRequest,
+        background_tasks: BackgroundTasks,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> MembershipSandboxSimulationResponse:
+        require_account_access(session, payload.account_id, required=auth_required)
+        provider = getattr(service, "payment_provider", None)
+        provider_name = str(getattr(provider, "provider_name", ""))
+        if provider is None or not provider_name.startswith("SANDBOX"):
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "SANDBOX_PROVIDER_UNAVAILABLE",
+                    "message": "sandbox provider required",
+                },
+            )
+        details = getattr(service, "payment_details", None)
+        if not callable(details):
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "MEMBERSHIP_PAYMENT_DETAILS_UNAVAILABLE",
+                    "message": "payment details required",
+                },
+            )
+        try:
+            owner, amount_cents = cast(Callable[[str], tuple[str, int]], details)(
+                payload.payment_no
+            )
+            if owner != payload.account_id:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, detail="payment does not belong to account"
+                )
+            provider.create_checkout(payload.payment_no, amount_cents, currency="CNY")
+            events = provider.simulate_callback(
+                payload.payment_no,
+                payload.status,
+                delay_seconds=payload.delay_seconds,
+                duplicate=payload.duplicate,
+            )
+        except HTTPException:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        event = events[0]
+        if payload.delay_seconds:
+
+            async def process_delayed() -> None:
+                await asyncio.sleep(payload.delay_seconds)
+                for delayed_event in events:
+                    invoke(
+                        "handle_payment_provider_event",
+                        delayed_event,
+                        now=delayed_event.available_at,
+                    )
+
+            background_tasks.add_task(process_delayed)
+            return MembershipSandboxSimulationResponse(
+                payment_no=payload.payment_no,
+                provider=event.provider,
+                event_id=event.event_id,
+                status=ProviderStatus.PROCESSING.value,
+                processed=False,
+                available_at=event.available_at,
+            )
+        order_id: str | None = None
+        for callback_event in events:
+            order_id = str(invoke("handle_payment_provider_event", callback_event))
+        return MembershipSandboxSimulationResponse(
+            payment_no=payload.payment_no,
+            order_id=order_id,
+            provider=event.provider,
+            event_id=event.event_id,
+            status=event.status.value,
+            processed=True,
+            available_at=event.available_at,
+        )
 
     @router.post("/api/v1/gifts", status_code=status.HTTP_201_CREATED)
     def send_gift(

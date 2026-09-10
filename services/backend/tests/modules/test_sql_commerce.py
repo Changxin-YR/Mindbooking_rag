@@ -174,6 +174,27 @@ class TransactionalFailingWallet(FakeWallet):
         raise RuntimeError("wallet unavailable")
 
 
+class LockingFakeWallet(FakeWallet):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[str] = []
+
+    def lock_account_in_transaction(self, connection: sa.Connection, account_id: str) -> None:
+        del connection, account_id
+        self.events.append("lock")
+
+    def spend_in_transaction(
+        self,
+        connection: sa.Connection,
+        account_id: str,
+        amount: int,
+        now: datetime | None = None,
+        reason: str = "PURCHASE",
+    ) -> tuple[LotAllocation, ...]:
+        self.events.append("spend")
+        return super().spend_in_transaction(connection, account_id, amount, now, reason)
+
+
 def _schema() -> sa.MetaData:
     metadata = sa.MetaData()
     payment_orders = sa.Table(
@@ -418,6 +439,62 @@ def test_sql_commerce_shared_transaction_rolls_back_partial_wallet_grants() -> N
         )
 
 
+def test_sql_commerce_preserves_success_and_records_credit_pending_when_repair_port_is_configured() -> (
+    None
+):
+    service, engine = _service(FakeWallet(fail=True))
+    checkout = service.create_recharge("acct-1", "RECHARGE_100", "FAKE", "key-credit-pending")
+    pending: list[tuple[str, str, int]] = []
+    service.record_payment_credit_failure = lambda payment_id, account_id, amount_cents: (
+        pending.append((payment_id, account_id, amount_cents))
+    )
+
+    assert (
+        service.handle_payment_callback(
+            "FAKE", "event-credit-pending", checkout.payment_order.payment_no, "tx-credit-pending"
+        )
+        == checkout.recharge_order.recharge_no
+    )
+
+    with engine.begin() as connection:
+        assert (
+            connection.execute(sa.text("SELECT status FROM payment_orders")).scalar_one() == "PAID"
+        )
+        assert (
+            connection.execute(sa.text("SELECT status FROM recharge_orders")).scalar_one()
+            == "CREDIT_PENDING"
+        )
+        assert (
+            connection.execute(sa.text("SELECT COUNT(*) FROM payment_channel_events")).scalar_one()
+            == 1
+        )
+    assert pending == [
+        (checkout.payment_order.payment_no, "acct-1", checkout.payment_order.paid_cents)
+    ]
+
+
+def test_sql_commerce_repair_payment_credit_is_idempotent() -> None:
+    wallet = FakeWallet(fail=True)
+    service, engine = _service(wallet)
+    checkout = service.create_recharge("acct-1", "RECHARGE_100", "FAKE", "key-credit-repair")
+    service.record_payment_credit_failure = lambda *_: None
+    service.handle_payment_callback(
+        "FAKE", "event-credit-repair", checkout.payment_order.payment_no
+    )
+    wallet.fail = False
+
+    assert service.repair_payment_credit(checkout.payment_order.payment_no) == (
+        checkout.recharge_order.recharge_no
+    )
+    assert service.repair_payment_credit(checkout.payment_order.payment_no) == (
+        checkout.recharge_order.recharge_no
+    )
+    with engine.begin() as connection:
+        assert (
+            connection.execute(sa.text("SELECT status FROM recharge_orders")).scalar_one() == "PAID"
+        )
+
+
 def test_sql_commerce_returns_provider_checkout_and_processes_verified_provider_event() -> None:
     provider = SandboxPaymentProvider(secret="sandbox-secret")
     service, _ = _service()
@@ -464,6 +541,93 @@ def test_sql_commerce_provider_failure_does_not_credit_wallet() -> None:
         )
 
 
+def test_sql_commerce_provider_status_updates_reuse_transaction_event() -> None:
+    provider = SandboxPaymentProvider(secret="sandbox-secret")
+    service, engine = _service()
+    service.payment_provider = provider
+    service.payment_provider_secret = "sandbox-secret"
+
+    paid_checkout = service.create_recharge(
+        "acct-processing-paid", "RECHARGE_100", "SANDBOX", "processing-paid"
+    )
+    processing = provider.generate_callback_event(
+        paid_checkout.payment_order.payment_no, ProviderStatus.PROCESSING
+    )
+    assert (
+        service.handle_payment_provider_event(processing)
+        == paid_checkout.recharge_order.recharge_no
+    )
+    success = provider.generate_callback_event(
+        paid_checkout.payment_order.payment_no, ProviderStatus.SUCCESS
+    )
+    assert (
+        service.handle_payment_provider_event(success) == paid_checkout.recharge_order.recharge_no
+    )
+
+    failed_checkout = service.create_recharge(
+        "acct-processing-failed", "RECHARGE_100", "SANDBOX", "processing-failed"
+    )
+    pending = provider.generate_callback_event(
+        failed_checkout.payment_order.payment_no, ProviderStatus.PROCESSING
+    )
+    assert (
+        service.handle_payment_provider_event(pending) == failed_checkout.recharge_order.recharge_no
+    )
+    failed = provider.generate_callback_event(
+        failed_checkout.payment_order.payment_no, ProviderStatus.FAILED
+    )
+    assert (
+        service.handle_payment_provider_event(failed) == failed_checkout.recharge_order.recharge_no
+    )
+
+    with engine.begin() as connection:
+        statuses = (
+            connection.execute(sa.text("SELECT status FROM payment_orders ORDER BY id"))
+            .scalars()
+            .all()
+        )
+        assert statuses[-2:] == ["PAID", "FAILED"]
+        assert (
+            connection.execute(sa.text("SELECT COUNT(*) FROM payment_channel_events")).scalar_one()
+            == 2
+        )
+
+
+def test_sql_commerce_provider_terminal_status_cannot_regress() -> None:
+    provider = SandboxPaymentProvider(secret="sandbox-secret")
+    service, _ = _service()
+    service.payment_provider = provider
+    service.payment_provider_secret = "sandbox-secret"
+    checkout = service.create_recharge("acct-terminal", "RECHARGE_100", "SANDBOX", "terminal")
+    failed = provider.generate_callback_event(
+        checkout.payment_order.payment_no, ProviderStatus.FAILED
+    )
+    service.handle_payment_provider_event(failed)
+    processing = provider.generate_callback_event(
+        checkout.payment_order.payment_no, ProviderStatus.PROCESSING
+    )
+    with pytest.raises(ValueError, match="PAYMENT_STATE_CONFLICT"):
+        service.handle_payment_provider_event(processing)
+
+
+def test_sql_commerce_provider_callback_accepts_naive_event_datetime() -> None:
+    provider = SandboxPaymentProvider(
+        secret="sandbox-secret", clock=lambda: datetime.fromisoformat("2026-09-05T12:00:00")
+    )
+    service, _ = _service()
+    service.payment_provider = provider
+    service.payment_provider_secret = "sandbox-secret"
+    checkout = service.create_recharge("acct-naive", "RECHARGE_100", "SANDBOX", "naive-clock")
+
+    event = provider.generate_callback_event(
+        checkout.payment_order.payment_no, ProviderStatus.SUCCESS
+    )
+    assert (
+        service.handle_payment_provider_event(event, now=datetime(2026, 9, 5, 12, tzinfo=UTC))
+        == checkout.recharge_order.recharge_no
+    )
+
+
 def test_sql_chapter_purchase_is_persisted_and_idempotent() -> None:
     wallet = FakeWallet()
     service, engine = _service(wallet)
@@ -492,6 +656,16 @@ def test_sql_chapter_purchase_is_persisted_and_idempotent() -> None:
         assert (
             connection.execute(sa.text("SELECT COUNT(*) FROM wallet_mutations")).scalar_one() == 1
         )
+
+
+def test_sql_chapter_purchase_locks_wallet_before_spend() -> None:
+    wallet = LockingFakeWallet()
+    service, _ = _service(wallet)
+    service.register_chapter_policy("chapter-1", ChapterPolicy(100, AccessMode.PURCHASED))
+
+    service.purchase_chapter("acct-1", "chapter-1")
+
+    assert wallet.events == ["lock", "spend"]
 
 
 def test_sql_chapter_purchase_passes_revenue_context_to_finance_port() -> None:

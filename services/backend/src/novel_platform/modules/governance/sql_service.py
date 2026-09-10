@@ -103,13 +103,7 @@ class SqlGovernanceService(GovernanceService):
                 for row in connection.execute(sa.select(self._parameters_table)).mappings()
             }
             self._pending = {
-                str(row["payment_id"]): PaymentCreditPending(
-                    str(row["id"]),
-                    str(row["payment_id"]),
-                    str(row["account_id"]),
-                    int(row["amount_cents"]),
-                    str(row["status"]),
-                )
+                str(row["payment_id"]): self._pending_from_row(row)
                 for row in connection.execute(sa.select(self._pending_table)).mappings()
             }
             self._batches = {
@@ -273,7 +267,7 @@ class SqlGovernanceService(GovernanceService):
     def record_payment_credit_failure(
         self, payment_id: str, account_id: str, amount_cents: int
     ) -> PaymentCreditPending:
-        if amount_cents <= 0:
+        if not payment_id.strip() or not account_id.strip() or amount_cents <= 0:
             raise ValueError("PAYMENT_AMOUNT_INVALID")
         with self.engine.begin() as connection:
             row = (
@@ -286,25 +280,177 @@ class SqlGovernanceService(GovernanceService):
                 .one_or_none()
             )
             if row is not None:
-                return PaymentCreditPending(
-                    str(row["id"]),
-                    str(row["payment_id"]),
-                    str(row["account_id"]),
-                    int(row["amount_cents"]),
-                    str(row["status"]),
-                )
+                existing = self._pending_from_row(row)
+                if existing.account_id != account_id or existing.amount_cents != amount_cents:
+                    raise ValueError("PAYMENT_CREDIT_CONFLICT")
+                self._pending[payment_id] = existing
+                return existing
             pending = PaymentCreditPending(_id("CREDIT"), payment_id, account_id, amount_cents)
-            connection.execute(
-                self._pending_table.insert().values(
-                    id=pending.id,
-                    payment_id=pending.payment_id,
-                    account_id=pending.account_id,
-                    amount_cents=pending.amount_cents,
-                    status=pending.status,
-                    created_at=datetime.now(UTC),
+            values: dict[str, object] = {
+                "id": pending.id,
+                "payment_id": pending.payment_id,
+                "account_id": pending.account_id,
+                "amount_cents": pending.amount_cents,
+                "status": pending.status,
+                "created_at": datetime.now(UTC),
+            }
+            self._set_pending_optional_values(values, attempts=0)
+            connection.execute(self._pending_table.insert().values(**values))
+            self._pending[payment_id] = pending
+            return pending
+
+    def list_payment_credit_pending(
+        self, status: str | None = None
+    ) -> tuple[PaymentCreditPending, ...]:
+        normalized = status.strip().upper() if status else None
+        if normalized not in {
+            None,
+            "CREDIT_PENDING",
+            "REPAIRING",
+            "REPAIR_REQUIRED",
+            "RESOLVED",
+        }:
+            raise ValueError("PAYMENT_CREDIT_STATUS_INVALID")
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                sa.select(self._pending_table).order_by(self._pending_table.c.id)
+            ).mappings()
+            result = tuple(
+                pending
+                for row in rows
+                for pending in (self._pending_from_row(row),)
+                if (
+                    normalized is None
+                    and pending.status in {"CREDIT_PENDING", "REPAIRING", "REPAIR_REQUIRED"}
+                    or normalized is not None
+                    and pending.status == normalized
                 )
             )
-            return pending
+        self._pending.update({item.payment_id: item for item in result})
+        return result
+
+    def retry_payment_credit(self, payment_id: str, actor_id: str) -> PaymentCreditPending:
+        if not actor_id.strip():
+            raise ValueError("PAYMENT_CREDIT_ACTOR_REQUIRED")
+        now = datetime.now(UTC)
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    sa.select(self._pending_table)
+                    .where(self._pending_table.c.payment_id == payment_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise KeyError(payment_id)
+            pending = self._pending_from_row(row)
+            if pending.status == "RESOLVED":
+                return pending
+            if pending.status == "REPAIRING":
+                stale = pending.last_attempted_at is None or pending.last_attempted_at <= (
+                    now - timedelta(minutes=5)
+                )
+                if not stale:
+                    raise ValueError("PAYMENT_CREDIT_REPAIR_IN_PROGRESS")
+            values: dict[str, object] = {"status": "REPAIRING"}
+            self._set_pending_optional_values(
+                values,
+                attempts=pending.attempts + 1,
+                last_attempted_at=now,
+                repair_actor_id=actor_id.strip(),
+                last_error=None,
+            )
+            connection.execute(
+                self._pending_table.update()
+                .where(self._pending_table.c.payment_id == payment_id)
+                .values(**values)
+            )
+            pending = PaymentCreditPending(
+                pending.id,
+                pending.payment_id,
+                pending.account_id,
+                pending.amount_cents,
+                "REPAIRING",
+                pending.attempts + 1,
+                None,
+                now,
+                pending.resolved_at,
+                actor_id.strip(),
+            )
+        repair = self.repair_payment_credit
+        error: str | None = None
+        try:
+            if not callable(repair):
+                raise ValueError("CREDIT_REPAIR_PORT_UNAVAILABLE")  # noqa: TRY004
+            if repair(payment_id) is False:
+                raise RuntimeError("CREDIT_REPAIR_REJECTED")
+        except Exception as exc:  # noqa: BLE001 - preserve repair state for every failure
+            error = str(exc) or type(exc).__name__
+        status = "REPAIR_REQUIRED" if error is not None else "RESOLVED"
+        resolved_at = now if error is None else None
+        with self.engine.begin() as connection:
+            final_values: dict[str, object] = {"status": status}
+            self._set_pending_optional_values(
+                final_values, last_error=error, resolved_at=resolved_at
+            )
+            connection.execute(
+                self._pending_table.update()
+                .where(
+                    self._pending_table.c.payment_id == payment_id,
+                    self._pending_table.c.status == "REPAIRING",
+                )
+                .values(**final_values)
+            )
+        pending = PaymentCreditPending(
+            pending.id,
+            pending.payment_id,
+            pending.account_id,
+            pending.amount_cents,
+            status,
+            pending.attempts,
+            error,
+            pending.last_attempted_at,
+            resolved_at,
+            pending.repair_actor_id,
+        )
+        self._pending[payment_id] = pending
+        return pending
+
+    def auto_repair_payment_credits(self, *, limit: int = 10) -> tuple[PaymentCreditPending, ...]:
+        if not 1 <= limit <= 100:
+            raise ValueError("PAYMENT_CREDIT_REPAIR_LIMIT_INVALID")
+        pending = self.list_payment_credit_pending("CREDIT_PENDING")[:limit]
+        return tuple(
+            self.retry_payment_credit(item.payment_id, "system-credit-repair") for item in pending
+        )
+
+    def _set_pending_optional_values(self, values: dict[str, object], **kwargs: object) -> None:
+        for name, value in kwargs.items():
+            if name in self._pending_table.c:
+                values[name] = value
+
+    @staticmethod
+    def _pending_from_row(row: sa.RowMapping) -> PaymentCreditPending:
+        def timestamp(name: str) -> datetime | None:
+            value = cast(datetime | None, row.get(name))
+            if value is None:
+                return None
+            return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+        return PaymentCreditPending(
+            str(row["id"]),
+            str(row["payment_id"]),
+            str(row["account_id"]),
+            int(row["amount_cents"]),
+            str(row["status"]),
+            int(row.get("attempts") or 0),
+            str(row["last_error"]) if row.get("last_error") is not None else None,
+            timestamp("last_attempted_at"),
+            timestamp("resolved_at"),
+            str(row["repair_actor_id"]) if row.get("repair_actor_id") is not None else None,
+        )
 
     def open_reconciliation(self, business_date: str) -> ReconciliationBatch:
         with self.engine.begin() as connection:
@@ -380,6 +526,109 @@ class SqlGovernanceService(GovernanceService):
     def reconciliation_batch(self, batch_id: str) -> ReconciliationBatch:
         return self._batches[batch_id]
 
+    def list_reconciliation_batches(
+        self, status: str | None = None
+    ) -> tuple[ReconciliationBatch, ...]:
+        normalized = status.strip().upper() if status else None
+        allowed = {item.value for item in ReconciliationStatus}
+        if normalized not in {None, *allowed}:
+            raise ValueError("RECONCILIATION_STATUS_INVALID")
+        with self.engine.begin() as connection:
+            batches = {
+                str(row["id"]): ReconciliationBatch(
+                    str(row["id"]),
+                    str(row["business_date"]),
+                    ReconciliationStatus(str(row["status"])),
+                )
+                for row in connection.execute(
+                    sa.select(self._batches_table).order_by(
+                        self._batches_table.c.business_date.desc(),
+                        self._batches_table.c.id.desc(),
+                    )
+                ).mappings()
+                if normalized is None or str(row["status"]) == normalized
+            }
+            if batches:
+                rows = connection.execute(
+                    sa.select(self._items_table).where(
+                        self._items_table.c.batch_id.in_(tuple(batches))
+                    )
+                ).mappings()
+                for row in rows:
+                    batches[str(row["batch_id"])].items.append(
+                        ReconciliationItem(
+                            str(row["id"]),
+                            str(row["batch_id"]),
+                            str(row["reference"]),
+                            ReconciliationDifference(str(row["difference"])),
+                            int(row["amount_cents"]),
+                        )
+                    )
+        self._batches.update(batches)
+        return tuple(batches.values())
+
+    def mark_reconciliation_repaired(self, batch_id: str, operator_id: str) -> ReconciliationBatch:
+        if not operator_id.strip():
+            raise ValueError("RECONCILIATION_OPERATOR_REQUIRED")
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    sa.select(self._batches_table)
+                    .where(self._batches_table.c.id == batch_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise KeyError(batch_id)
+            current = ReconciliationStatus(str(row["status"]))
+            if current is ReconciliationStatus.OPEN:
+                connection.execute(
+                    self._batches_table.update()
+                    .where(self._batches_table.c.id == batch_id)
+                    .values(status=ReconciliationStatus.REPAIRED.value)
+                )
+                current = ReconciliationStatus.REPAIRED
+        batch = self._batches.get(batch_id) or ReconciliationBatch(
+            batch_id, str(row["business_date"]), current
+        )
+        batch.status = current
+        self._batches[batch_id] = batch
+        return batch
+
+    def close_reconciliation(self, batch_id: str, operator_id: str) -> ReconciliationBatch:
+        if not operator_id.strip():
+            raise ValueError("RECONCILIATION_OPERATOR_REQUIRED")
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    sa.select(self._batches_table)
+                    .where(self._batches_table.c.id == batch_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise KeyError(batch_id)
+            current = ReconciliationStatus(str(row["status"]))
+            if current is ReconciliationStatus.OPEN:
+                raise ValueError("RECONCILIATION_REPAIR_REQUIRED")
+            if current is ReconciliationStatus.REPAIRED:
+                connection.execute(
+                    self._batches_table.update()
+                    .where(self._batches_table.c.id == batch_id)
+                    .values(status=ReconciliationStatus.CLOSED.value)
+                )
+                current = ReconciliationStatus.CLOSED
+        batch = self._batches.get(batch_id) or ReconciliationBatch(
+            batch_id, str(row["business_date"]), current
+        )
+        batch.status = current
+        self._batches[batch_id] = batch
+        return batch
+
     def pause_features(self, reason: str, features: set[str], operator_id: str) -> Emergency:
         if not reason.strip() or not features or not operator_id.strip():
             raise ValueError("EMERGENCY_INVALID")
@@ -441,7 +690,17 @@ class SqlGovernanceService(GovernanceService):
         return event
 
     def outbox_event(self, event_id: str) -> OutboxEvent:
-        return self._outbox[event_id]
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    sa.select(self._outbox_table).where(self._outbox_table.c.id == event_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise KeyError(event_id)
+        return self._event_from_row(row)
 
     def claim_outbox(
         self,
@@ -543,6 +802,18 @@ class SqlGovernanceService(GovernanceService):
             raise ValueError("OUTBOX_WORKER_REQUIRED")
         now = now or datetime.now(UTC)
         with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    sa.select(self._outbox_table)
+                    .where(self._outbox_table.c.id == event_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise KeyError(event_id)
+            current = self._event_from_row(row)
             result = connection.execute(
                 self._outbox_table.update()
                 .where(
@@ -556,7 +827,7 @@ class SqlGovernanceService(GovernanceService):
                 .values(
                     status=(
                         OutboxStatus.PROCESSED.value
-                        if self._outbox[event_id].status is OutboxStatus.PROCESSING
+                        if current.status is OutboxStatus.PROCESSING
                         else OutboxStatus.PUBLISHED.value
                     ),
                     available_at=None,
@@ -567,7 +838,7 @@ class SqlGovernanceService(GovernanceService):
             )
             if result.rowcount != 1:
                 raise ValueError("OUTBOX_CLAIM_REQUIRED")
-        event = self._outbox[event_id]
+        event = current
         updated = OutboxEvent(
             event.id,
             event.event_type,
@@ -602,7 +873,18 @@ class SqlGovernanceService(GovernanceService):
             raise ValueError("OUTBOX_FAILURE_INVALID")
         now = now or datetime.now(UTC)
         with self.engine.begin() as connection:
-            event = self._outbox[event_id]
+            row = (
+                connection.execute(
+                    sa.select(self._outbox_table)
+                    .where(self._outbox_table.c.id == event_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise KeyError(event_id)
+            event = self._event_from_row(row)
             result = connection.execute(
                 self._outbox_table.update()
                 .where(

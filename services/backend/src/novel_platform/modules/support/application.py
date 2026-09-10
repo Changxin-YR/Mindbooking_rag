@@ -30,6 +30,9 @@ class SupportService:
     def get_ticket(self, ticket_id: str) -> SupportTicket:
         return self._tickets[ticket_id]
 
+    def list_tickets(self, account_id: str) -> list[SupportTicket]:
+        return [ticket for ticket in self._tickets.values() if ticket.account_id == account_id]
+
     def resolve(self, ticket_id: str) -> SupportTicket:
         ticket = self.get_ticket(ticket_id)
         if ticket.status is SupportStatus.CLOSED:

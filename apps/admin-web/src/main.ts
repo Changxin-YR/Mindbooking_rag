@@ -1,4 +1,6 @@
 import { createApp, defineComponent, h, onMounted, ref } from 'vue'
+import { createApiClient } from '@mindbooking/api-client'
+import type { PaymentCreditPendingDto } from '@mindbooking/api-types'
 import { buildAdminHeaders, parseShellState, readAdminAccessToken, type ShellState } from './shell-state'
 import './styles.css'
 import './route.css'
@@ -6,198 +8,119 @@ import './route.css'
 type Review = { id: string; book_id: string; status: string; fixed_version_ids: string[] }
 type Rule = { code: string; severity: string; recommended_action: string; version: string }
 type Dashboard = { csat_count: number; open_alert_count: number }
+type Book = { id: string; author_id: string; title: string; lifecycle: string; visibility: string }
+type CreditPending = PaymentCreditPendingDto
+type AgentMessage = { id: string; session_id: string; role: 'user' | 'assistant'; content: string; tool_name?: string | null; created_at: string }
+type AgentPendingAction = { id: string; session_id: string; tool_name: string; arguments_hash: string; arguments_snapshot: Record<string, unknown>; risk_level: string; impact_summary: string; expires_at: string; status: string }
 
 const apiBase = ((import.meta as ImportMeta & { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/+$/, '')
-function sessionToken() {
-  try { return readAdminAccessToken(window.localStorage) } catch { return '' }
-}
+const navigation = ['总览', '内容审核', '作者与作品', '用户 360', '社区治理', '财务查询', '风险与审批', '参数中心', '会员配置', '文件与审计', '墨笺助手']
+const navIcons: Record<string, string> = { 总览: '⌂', 内容审核: '▤', '作者与作品': '♧', '用户 360': '♙', 社区治理: '♡', 财务查询: '▥', 风险与审批: '♢', 参数中心: '⚙', 会员配置: '♕', 文件与审计: '▧', '墨笺助手': '✦' }
 
+function sessionToken() { try { return readAdminAccessToken(window.localStorage) } catch { return '' } }
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = buildAdminHeaders(sessionToken(), init?.headers)
-  if (init?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-  const response = await fetch(`${apiBase}${path}`, { ...init, headers })
-  if (response.status === 401) {
-    window.localStorage.removeItem('admin_access_token')
-    throw new Error('UNAUTHORIZED')
+  try { return await createApiClient({ baseUrl: apiBase, token: sessionToken() }).request<T>(path, init) }
+  catch (error) {
+    if (error instanceof Error && 'status' in error && (error as { status?: number }).status === 401) { window.localStorage.removeItem('admin_access_token'); throw new Error('UNAUTHORIZED') }
+    throw error
   }
-  if (!response.ok) throw new Error(`HTTP ${response.status}`)
-  return response.json() as Promise<T>
 }
 
-const item = (tag: string, className: string, children: Parameters<typeof h>[2] = []) => h(tag, { class: className }, children)
-const navLink = (label: string, active: boolean) => h('a', { class: ['admin-side-link', active && 'active'], href: label === '退出登录' ? '#sign-out' : `?view=${encodeURIComponent(label)}`, onClick: label === '退出登录' ? (event: Event) => { event.preventDefault(); window.localStorage.removeItem('admin_access_token'); window.location.reload() } : undefined }, label)
+const el = (tag: string, className = '', children: Parameters<typeof h>[2] = []) => h(tag, { class: className }, children)
+const text = (tag: string, value: string, className = '') => h(tag, { class: className }, value)
+const field = (label: string, control: ReturnType<typeof h>) => h('label', { class: 'form-field' }, [text('span', label), control])
+const input = (props: Record<string, unknown>) => h('input', { class: 'control', ...props })
+const button = (label: string, className = 'primary-button', props: Record<string, unknown> = {}) => h('button', { class: className, type: 'button', ...props }, label)
+const link = (label: string, className = 'text-link') => h('a', { class: className, href: '#' }, label)
 
 function stateView(state: ShellState) {
-  if (state === 'unauthorized') return h('main', { class: 'admin-state' }, [h('form', { class: 'admin-state-box admin-login', onSubmit: async (event: Event) => {
-    event.preventDefault()
-    const fields = new FormData(event.currentTarget as HTMLFormElement)
-    const response = await fetch(`${apiBase}/admin/api/v1/auth/staff/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ employee_code: fields.get('employee_code'), password: fields.get('password') }) })
-    if (!response.ok) return
-    const result = await response.json() as { access_token: string }
-    window.localStorage.setItem('admin_access_token', result.access_token)
-    window.location.reload()
-  } }, [item('div', 'admin-state-mark', '墨页'), item('p', 'admin-kicker', 'STAFF ACCESS'), item('h1', '', '登录运营后台'), item('p', '', '使用 StaffAccount 会话进入授权范围。'), h('label', { class: 'admin-login-field' }, [h('span', {}, '工号'), h('input', { name: 'employee_code', required: true, autocomplete: 'username' })]), h('label', { class: 'admin-login-field' }, [h('span', {}, '密码'), h('input', { name: 'password', required: true, type: 'password', autocomplete: 'current-password' })]), h('button', { class: 'admin-state-action', type: 'submit' }, '登录')])])
-  const content = { loading: ['admin-spinner', '正在加载控制台', '权限范围与任务队列即将出现。'], empty: ['admin-state-mark', '当前没有任务', '新的审核和治理任务会出现在这里。'], error: ['admin-state-mark', '控制台暂时不可用', '请稍后重试，原始业务事实不会被修改。'], unauthorized: ['admin-state-mark', '没有后台权限', '请使用 StaffAccount 登录，不要使用读者账号。'], ready: ['', '', ''] }[state]
-  return item('main', 'admin-state', [item('div', 'admin-state-box', [item('div', content[0], content[0] === 'admin-spinner' ? '' : '!'), item('h1', '', content[1]), item('p', '', content[2]), h('a', { class: 'admin-state-action', href: '?state=ready' }, state === 'error' ? '重新加载' : '返回控制台')])])
+  if (state === 'unauthorized') return h('main', { class: 'state-screen' }, [h('form', { class: 'login-card', onSubmit: async (event: Event) => {
+    event.preventDefault(); const data = new FormData(event.currentTarget as HTMLFormElement)
+    const response = await fetch(`${apiBase}/admin/api/v1/auth/staff/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ employee_code: data.get('employee_code'), password: data.get('password') }) })
+    if (response.ok) { const result = await response.json() as { access_token: string }; window.localStorage.setItem('admin_access_token', result.access_token); window.location.reload() }
+  } }, [el('div', 'login-mark', '墨'), text('p', '运营管理平台', 'login-kicker'), text('h1', '登录运营后台'), text('p', '使用 StaffAccount 会话进入授权范围。', 'login-copy'), field('工号', input({ name: 'employee_code', required: true, autocomplete: 'username' })), field('密码', input({ name: 'password', type: 'password', required: true, autocomplete: 'current-password' })), button('进入控制台', 'primary-button full-button', { type: 'submit' })])])
+  const message = state === 'loading' ? '正在加载控制台' : state === 'error' ? '控制台暂时不可用' : '当前没有任务'
+  return h('main', { class: 'state-screen' }, [el('div', 'state-card', [el('div', state === 'loading' ? 'spinner' : 'state-mark', state === 'loading' ? '' : '!'), text('h1', message), text('p', '权限范围与任务队列即将出现。'), h('a', { class: 'primary-button', href: '?state=ready' }, '返回控制台')])])
 }
 
 const Console = defineComponent({
   setup() {
-    const state = ref(sessionToken() ? parseShellState(new URLSearchParams(window.location.search).get('state')) : 'unauthorized')
+    const state = ref<ShellState>(sessionToken() ? parseShellState(new URLSearchParams(window.location.search).get('state')) : 'unauthorized')
     const view = ref(new URLSearchParams(window.location.search).get('view') || '总览')
-    const reviews = ref<Review[]>([])
-    const rules = ref<Rule[]>([])
-    const dashboard = ref<Dashboard>({ csat_count: 0, open_alert_count: 0 })
-    const user = ref<{ phone: string; real_name: string; asset_cents: number | null } | null>(null)
-    const accountId = ref('')
-    const accountPhone = ref('')
-    const key = ref('vip.price')
-    const value = ref('199')
-    const staffId = ref('')
-    const reviewerId = ref('')
-    const reviewDecision = ref('APPROVE')
-    const membershipPlanCode = ref('MONTHLY')
-    const membershipPlanName = ref('月度会员')
-    const membershipDuration = ref('30')
-    const membershipPrice = ref('999')
-    const membershipDailyTickets = ref('2')
-    const membershipMonthlyTickets = ref('5')
-    const message = ref('')
-    const employeeCode = ref('')
-    const password = ref('')
-    const loginError = ref('')
+    const message = ref('当前会话只显示授权范围内的业务事实。')
+    const reviews = ref<Review[]>([]); const rules = ref<Rule[]>([]); const books = ref<Book[]>([]); const creditPending = ref<CreditPending[]>([])
+    const dashboard = ref<Dashboard>({ csat_count: 0, open_alert_count: 0 }); const user = ref<{ phone: string; real_name: string; asset_cents: number | null } | null>(null)
+    const accountId = ref(''); const accountPhone = ref(''); const key = ref('vip.price'); const value = ref('199'); const staffId = ref('')
+    const reviewerId = ref(''); const reviewDecision = ref('APPROVE'); const membershipPlanCode = ref('MONTHLY'); const membershipPlanName = ref('月度会员'); const membershipDuration = ref('30'); const membershipPrice = ref('999'); const membershipDailyTickets = ref('2'); const membershipMonthlyTickets = ref('5')
+    const commercialChapterId = ref(''); const commercialPriceCoin = ref('100'); const employeeCode = ref(''); const password = ref(''); const loginError = ref('')
+    const creditPaymentId = ref(''); const creditAccountId = ref(''); const creditAmountCents = ref(''); const reconciliationDate = ref(new Date().toISOString().slice(0, 10))
+    const riskAccountId = ref(''); const riskOrderId = ref(''); const riskSignalType = ref('PAYMENT_ANOMALY'); const riskSignalId = ref(''); const outboxEventType = ref(''); const outboxAggregateId = ref(''); const outboxPayload = ref('{}')
+    const harnessUrl = ref(''); const harnessLoading = ref(false); const harnessError = ref('')
+    const agentSessionId = ref(''); const agentSessionList = ref<{ id: string; title?: string | null; updated_at: string }[]>([]); const agentMessages = ref<AgentMessage[]>([]); const agentInput = ref(''); const agentSending = ref(false); const agentPending = ref<AgentPendingAction | null>(null)
 
-    async function login(event: Event) {
-      event.preventDefault()
-      loginError.value = ''
-      try {
-        const response = await fetch(`${apiBase}/admin/api/v1/auth/staff/sessions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ employee_code: employeeCode.value.trim(), password: password.value }),
-        })
-        if (!response.ok) throw new Error('INVALID_STAFF_CREDENTIALS')
-        const result = await response.json() as { access_token: string }
-        window.localStorage.setItem('admin_access_token', result.access_token)
-        password.value = ''
-        state.value = 'ready'
-        await load()
-      } catch {
-        loginError.value = 'Staff 登录失败，请检查工号和密码。'
-      }
-    }
-
-    async function signOut(event?: Event) {
-      event?.preventDefault()
-      const token = sessionToken()
-      try {
-        if (token) await fetch(`${apiBase}/admin/api/v1/auth/staff/sessions/current`, { method: 'DELETE', headers: buildAdminHeaders(token) })
-      } finally {
-        window.localStorage.removeItem('admin_access_token')
-        state.value = 'unauthorized'
-        message.value = ''
-      }
-    }
-
-    async function load() {
-      if (!sessionToken()) {
-        message.value = '未检测到 StaffAccount 会话，请先完成登录。'
-        return
-      }
-      try {
-        if (view.value === '内容审核') reviews.value = await request<Review[]>('/admin/api/v1/reviews')
-        if (view.value === '参数中心') rules.value = await request<Rule[]>('/admin/api/v1/review-rules')
-        dashboard.value = await request<Dashboard>('/admin/api/v1/support/dashboard')
-      } catch { message.value = '查询暂时不可用，请检查后端服务。' }
-    }
-    async function loadUser(event: Event) {
-      event.preventDefault()
-      const queryAccountId = accountId.value.trim()
-      const queryPhone = accountPhone.value.trim()
-      if (!queryAccountId || !queryPhone) {
-        message.value = '请填写查询账号 ID 和手机号。'
-        return
-      }
-      try {
-        user.value = await request('/admin/api/v1/user-360', { method: 'POST', body: JSON.stringify({ account_id: queryAccountId, phone: queryPhone, real_name: '', asset_cents: 0, membership_level: 0, growth_level: 0 }) })
-        message.value = '已返回脱敏 User360 视图。'
-      } catch { message.value = 'User360 查询失败。' }
-    }
-    async function draftParameter(event: Event) {
-      event.preventDefault()
-      const makerId = staffId.value.trim()
-      if (!makerId) {
-        message.value = '请填写 Staff 操作者 ID。'
-        return
-      }
-      try { await request('/admin/api/v1/parameters', { method: 'POST', body: JSON.stringify({ key: key.value, value: value.value, maker_id: makerId }) }); message.value = '参数草案已保存，等待 Checker 审批。' } catch { message.value = '参数草案保存失败。' }
-    }
-    async function decideReview(review: Review, event: Event) {
-      event.preventDefault()
-      const reviewer = reviewerId.value.trim()
-      if (!reviewer) {
-        message.value = '请填写审核员 ID。'
-        return
-      }
-      try {
-        await request(`/admin/api/v1/reviews/${encodeURIComponent(review.id)}/decisions`, { method: 'POST', body: JSON.stringify({ reviewer_id: reviewer, decision: reviewDecision.value, actor_type: 'human' }) })
-        review.status = reviewDecision.value === 'APPROVE' ? 'APPROVED' : reviewDecision.value === 'REJECT' || reviewDecision.value === 'OFFLINE' ? 'REJECTED' : 'RETURNED'
-        message.value = '审核决定已记录。'
-      } catch { message.value = '审核决定提交失败，请检查权限和任务状态。' }
-    }
-    async function createMembershipPlan(event: Event) {
-      event.preventDefault()
-      try {
-        await request('/admin/api/v1/membership/plans', {
-          method: 'POST',
-          body: JSON.stringify({
-            plan_code: membershipPlanCode.value.trim(),
-            name: membershipPlanName.value.trim(),
-            duration_days: Number(membershipDuration.value),
-            price_cents: Number(membershipPrice.value),
-            daily_recommend_tickets: Number(membershipDailyTickets.value),
-            monthly_chapter_tickets: Number(membershipMonthlyTickets.value),
-            version: 1,
-          }),
-        })
-        message.value = '会员计划草案已写入配置中心。'
-      } catch {
-        message.value = '会员计划保存失败，请确认版本号和计划编码未重复。'
-      }
-    }
+    async function login(event: Event) { event.preventDefault(); loginError.value = ''; try { const response = await fetch(`${apiBase}/admin/api/v1/auth/staff/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ employee_code: employeeCode.value.trim(), password: password.value }) }); if (!response.ok) throw new Error(); const result = await response.json() as { access_token: string }; window.localStorage.setItem('admin_access_token', result.access_token); password.value = ''; state.value = 'ready'; await load() } catch { loginError.value = 'Staff 登录失败，请检查工号和密码。' } }
+    async function signOut(event?: Event) { event?.preventDefault(); const token = sessionToken(); try { if (token) await fetch(`${apiBase}/admin/api/v1/auth/staff/sessions/current`, { method: 'DELETE', headers: buildAdminHeaders(token) }) } finally { window.localStorage.removeItem('admin_access_token'); state.value = 'unauthorized'; message.value = '' } }
+    async function load() { if (!sessionToken()) return; try { if (view.value === '内容审核') reviews.value = await request<Review[]>('/admin/api/v1/reviews'); if (view.value === '参数中心') rules.value = await request<Rule[]>('/admin/api/v1/review-rules'); if (view.value === '作者与作品') books.value = await request<Book[]>('/admin/api/v1/books'); if (view.value === '财务查询') creditPending.value = await request<CreditPending[]>('/admin/api/v1/reconciliation/credit-pending'); if (view.value === '墨笺助手') { await loadAgentSessions(); await loadHarnessWeb() }; dashboard.value = await request<Dashboard>('/admin/api/v1/support/dashboard') } catch { message.value = '查询暂时不可用，请检查后端服务。' } }
+    async function loadHarnessWeb() { harnessLoading.value = true; harnessError.value = ''; try { harnessUrl.value = (await request<{ url: string }>('/admin/api/v1/agent/harness-url')).url } catch { harnessUrl.value = ''; harnessError.value = 'DeepSeek Harness 工作台暂时不可用。' } finally { harnessLoading.value = false } }
+    async function loadAgentSessions() { agentSessionList.value = await request('/admin/api/v1/agent/sessions'); if (!agentSessionId.value && agentSessionList.value[0]) agentSessionId.value = agentSessionList.value[0].id; if (!agentSessionId.value) { const created = await request<{ id: string }>('/admin/api/v1/agent/sessions', { method: 'POST', body: JSON.stringify({ title: '墨笺' }) }); agentSessionId.value = created.id; agentSessionList.value = await request('/admin/api/v1/agent/sessions') }; await loadAgentMessages() }
+    async function loadAgentMessages() { if (!agentSessionId.value) return; const result = await request<{ items: AgentMessage[] }>(`/admin/api/v1/agent/sessions/${encodeURIComponent(agentSessionId.value)}/messages`); agentMessages.value = result.items }
+    async function sendAgentMessage(event: Event) { event.preventDefault(); const content = agentInput.value.trim(); if (!content || agentSending.value) return; agentSending.value = true; try { const result = await request<{ session_id: string; response: string; tool_name?: string | null; pending_action?: AgentPendingAction | null }>('/admin/api/v1/agent/messages', { method: 'POST', body: JSON.stringify({ session_id: agentSessionId.value, message: content }) }); agentSessionId.value = result.session_id; agentPending.value = result.pending_action || null; agentInput.value = ''; await loadAgentMessages() } catch { message.value = '墨笺请求失败，服务端未确认任何业务结果。' } finally { agentSending.value = false } }
+    async function confirmAgentAction() { if (!agentPending.value) return; try { await request(`/admin/api/v1/agent/actions/${encodeURIComponent(agentPending.value.id)}/confirm`, { method: 'POST', body: JSON.stringify({ confirmation_token: `${agentPending.value.id}:${agentPending.value.arguments_hash}`, session_id: agentPending.value.session_id }) }); agentPending.value = null; await loadAgentMessages() } catch { message.value = '确认失败：动作可能已过期、被撤销或不在当前 Staff 会话范围内。' } }
+    async function cancelAgentAction() { if (!agentPending.value) return; try { await request(`/admin/api/v1/agent/actions/${encodeURIComponent(agentPending.value.id)}/cancel`, { method: 'POST' }); agentPending.value = null; await loadAgentMessages() } catch { message.value = '取消失败，请刷新当前会话。' } }
+    async function loadUser(event: Event) { event.preventDefault(); if (!accountId.value.trim() || !accountPhone.value.trim()) { message.value = '请填写查询账号 ID 和手机号。'; return } try { user.value = await request('/admin/api/v1/user-360', { method: 'POST', body: JSON.stringify({ account_id: accountId.value.trim(), phone: accountPhone.value.trim(), real_name: '', asset_cents: 0, membership_level: 0, growth_level: 0 }) }); message.value = '已返回脱敏 User360 视图。' } catch { message.value = 'User360 查询失败。' } }
+    async function draftParameter(event: Event) { event.preventDefault(); if (!staffId.value.trim()) { message.value = '请填写 Staff 操作者 ID。'; return } try { await request('/admin/api/v1/parameters', { method: 'POST', body: JSON.stringify({ key: key.value, value: value.value, maker_id: staffId.value.trim() }) }); message.value = '参数草案已保存，等待 Checker 审批。' } catch { message.value = '参数草案保存失败。' } }
+    async function decideReview(review: Review) { if (!reviewerId.value.trim()) { message.value = '请填写审核员 ID。'; return } try { await request(`/admin/api/v1/reviews/${encodeURIComponent(review.id)}/decisions`, { method: 'POST', body: JSON.stringify({ reviewer_id: reviewerId.value.trim(), decision: reviewDecision.value, actor_type: 'human' }) }); review.status = reviewDecision.value === 'APPROVE' ? 'APPROVED' : 'RETURNED'; message.value = '审核决定已记录。' } catch { message.value = '审核决定提交失败，请检查权限和任务状态。' } }
+    async function createMembershipPlan(event: Event) { event.preventDefault(); try { await request('/admin/api/v1/membership/plans', { method: 'POST', body: JSON.stringify({ plan_code: membershipPlanCode.value.trim(), name: membershipPlanName.value.trim(), duration_days: Number(membershipDuration.value), price_cents: Number(membershipPrice.value), daily_recommend_tickets: Number(membershipDailyTickets.value), monthly_chapter_tickets: Number(membershipMonthlyTickets.value), version: 1 }) }); message.value = '会员计划草案已写入配置中心。' } catch { message.value = '会员计划保存失败，请确认版本号和计划编码未重复。' } }
+    async function configureCommercialPolicy(event: Event) { event.preventDefault(); if (!commercialChapterId.value.trim() || !Number(commercialPriceCoin.value)) { message.value = '请填写章节 ID 和正整数价格。'; return } try { await request(`/admin/api/v1/chapters/${encodeURIComponent(commercialChapterId.value.trim())}/commercial-policy`, { method: 'POST', body: JSON.stringify({ price_coin: Number(commercialPriceCoin.value) }) }); message.value = '章节已配置为 VIP，接下来可进入审核发布。' } catch { message.value = '章节商业化配置失败，请确认章节存在且操作者具备 commerce.write。' } }
+    async function recordCreditPending(event: Event) { event.preventDefault(); if (!creditPaymentId.value.trim() || !creditAccountId.value.trim() || !Number(creditAmountCents.value)) { message.value = '请填写支付单、账号和金额。'; return } try { await request('/admin/api/v1/reconciliation/credit-pending', { method: 'POST', body: JSON.stringify({ payment_id: creditPaymentId.value.trim(), account_id: creditAccountId.value.trim(), amount_cents: Number(creditAmountCents.value) }) }); message.value = '已登记 CREDIT_PENDING，待财务对账修复。' } catch { message.value = '未入账登记失败，请检查权限和支付事实。' } }
+    async function openReconciliation(event: Event) { event.preventDefault(); try { await request('/admin/api/v1/reconciliation/batches', { method: 'POST', body: JSON.stringify({ business_date: reconciliationDate.value }) }); message.value = '日对账批次已创建。' } catch { message.value = '对账批次创建失败。' } }
+    async function retryCreditPending(pending: CreditPending) { try { await request(`/admin/api/v1/reconciliation/credit-pending/${encodeURIComponent(pending.payment_id)}/retry`, { method: 'POST' }); message.value = `支付 ${pending.payment_id} 的补账已提交。`; await load() } catch { message.value = `支付 ${pending.payment_id} 的补账失败，请检查队列状态。` } }
+    async function observeRisk(event: Event) { event.preventDefault(); if (!riskAccountId.value.trim() || !riskOrderId.value.trim()) { message.value = '请填写账号和订单。'; return } try { const signal = await request<{ id: string; status: string }>('/admin/api/v1/risk/signals', { method: 'POST', body: JSON.stringify({ account_id: riskAccountId.value.trim(), order_id: riskOrderId.value.trim(), signal_type: riskSignalType.value }) }); riskSignalId.value = signal.id; message.value = `风险信号已记录：${signal.status}` } catch { message.value = '风险信号记录失败，请确认订单存在。' } }
+    async function freezeRisk(event: Event) { event.preventDefault(); if (!riskSignalId.value.trim()) { message.value = '请先记录或填写风险信号 ID。'; return } try { const signal = await request<{ status: string }>(`/admin/api/v1/risk/signals/${encodeURIComponent(riskSignalId.value.trim())}/freeze`, { method: 'POST' }); message.value = `风险信号已更新：${signal.status}` } catch { message.value = '冻结风险信号失败。' } }
+    async function enqueueOutbox(event: Event) { event.preventDefault(); let payload: Record<string, unknown>; try { payload = JSON.parse(outboxPayload.value) as Record<string, unknown> } catch { message.value = 'Outbox payload 必须是合法 JSON。'; return } if (!outboxEventType.value.trim() || !outboxAggregateId.value.trim()) { message.value = '请填写事件类型和聚合 ID。'; return } try { await request('/admin/api/v1/outbox/events', { method: 'POST', body: JSON.stringify({ event_type: outboxEventType.value.trim(), aggregate_id: outboxAggregateId.value.trim(), payload }) }); message.value = 'Outbox 事件已入队。' } catch { message.value = 'Outbox 入队失败，请检查权限。' } }
     onMounted(load)
 
-    function workspace() {
-      if (view.value === '内容审核') {
-        const reviewerField = h('label', { class: 'admin-form-field' }, [
-          h('span', {}, '审核员 ID'),
-          h('input', { value: reviewerId.value, 'aria-label': '审核员 ID', onInput: (event: Event) => { reviewerId.value = (event.target as HTMLInputElement).value } }),
-        ])
-        const decisionField = h('label', { class: 'admin-form-field' }, [
-          h('span', {}, '决定'),
-          h('select', { value: reviewDecision.value, 'aria-label': '审核决定', onChange: (event: Event) => { reviewDecision.value = (event.target as HTMLSelectElement).value } }, ['APPROVE', 'RETURN_FOR_CHANGES', 'REJECT', 'OFFLINE'].map((decision) => h('option', { value: decision }, decision))),
-        ])
-        const reviewList = reviews.value.length
-          ? item('ul', 'admin-list', reviews.value.map((review) => h('li', { key: review.id }, [
-              h('strong', {}, review.book_id),
-              h('span', {}, `${review.status} · ${review.fixed_version_ids.length} 个固定版本`),
-              h('button', { class: 'admin-action', type: 'button', onClick: (event: Event) => decideReview(review, event) }, '提交决定'),
-            ])))
-          : item('div', 'admin-empty', [item('div', 'queue-icon', '✓'), item('h3', '', '暂无审核任务'), item('p', '', '队列按风险、内容类型、频道和 SLA 路由。')])
-        return item('section', 'admin-card', [item('p', 'admin-kicker', 'REVIEW QUEUE'), item('h2', '', '结构化审核结果'), item('div', 'admin-inline-form', [reviewerField, decisionField]), reviewList])
-      }
-      if (view.value === '用户 360') return item('section', 'admin-card', [item('p', 'admin-kicker', 'QUERY SERVICE'), item('h2', '', '用户 360'), h('form', { class: 'admin-inline-form', onSubmit: loadUser }, [h('label', { class: 'admin-form-field' }, [h('span', {}, '查询账号 ID'), h('input', { value: accountId.value, required: true, 'aria-label': '查询账号 ID', onInput: (event: Event) => { accountId.value = (event.target as HTMLInputElement).value } })]), h('label', { class: 'admin-form-field' }, [h('span', {}, '查询手机号'), h('input', { value: accountPhone.value, required: true, inputmode: 'tel', 'aria-label': '查询手机号', onInput: (event: Event) => { accountPhone.value = (event.target as HTMLInputElement).value } })]), h('button', { class: 'admin-action', type: 'submit' }, '查询')]), user.value ? item('div', 'user-facts', [item('div', '', [h('span', {}, '手机号'), h('strong', {}, user.value.phone)]), item('div', '', [h('span', {}, '实名状态'), h('strong', {}, user.value.real_name)]), item('div', '', [h('span', {}, '资产金额'), h('strong', {}, user.value.asset_cents === null ? '已脱敏' : `${user.value.asset_cents} 分` )])]) : item('div', 'admin-empty', [item('div', 'queue-icon', '◎'), item('h3', '', '字段默认脱敏'), item('p', '', '敏感字段需独立权限、原因和审计。')])])
-      if (view.value === '参数中心') return item('section', 'admin-card', [item('p', 'admin-kicker', 'PARAMETER CENTER'), item('h2', '', '关键参数版本'), h('form', { class: 'admin-inline-form', onSubmit: draftParameter }, [h('label', { class: 'admin-form-field' }, [h('span', {}, '参数键'), h('input', { value: key.value, required: true, 'aria-label': '参数键', onInput: (event: Event) => { key.value = (event.target as HTMLInputElement).value } })]), h('label', { class: 'admin-form-field' }, [h('span', {}, '参数值'), h('input', { value: value.value, required: true, 'aria-label': '参数值', onInput: (event: Event) => { value.value = (event.target as HTMLInputElement).value } })]), h('label', { class: 'admin-form-field' }, [h('span', {}, 'Staff 操作者 ID'), h('input', { value: staffId.value, required: true, 'aria-label': 'Staff 操作者 ID', onInput: (event: Event) => { staffId.value = (event.target as HTMLInputElement).value } })]), h('button', { class: 'admin-action', type: 'submit' }, '保存草案')]), item('p', 'admin-note', '草案 -> Domain 校验 -> Maker/Checker -> effective_at -> Activate。'), rules.value.length ? item('ul', 'admin-list', rules.value.map((rule) => h('li', { key: `${rule.code}-${rule.version}` }, [h('strong', {}, rule.code), h('span', {}, `${rule.severity} · ${rule.recommended_action} · v${rule.version}`)]))) : item('div', 'admin-empty compact', [item('h3', '', '规则库待配置'), item('p', '', '规则版本和参数版本独立管理。')])])
-      if (view.value === '会员配置') return item('section', 'admin-card', [item('p', 'admin-kicker', 'MEMBERSHIP CENTER'), item('h2', '', '会员权益配置'), item('p', 'admin-note', '周期、价格、推荐票和章节券由运营配置，会员书库通过独立入口绑定作品。'), h('form', { class: 'admin-inline-form', onSubmit: createMembershipPlan }, [h('label', { class: 'admin-form-field' }, [h('span', {}, '计划编码'), h('input', { value: membershipPlanCode.value, required: true, 'aria-label': '计划编码', onInput: (event: Event) => { membershipPlanCode.value = (event.target as HTMLInputElement).value } })]), h('label', { class: 'admin-form-field' }, [h('span', {}, '计划名称'), h('input', { value: membershipPlanName.value, required: true, 'aria-label': '计划名称', onInput: (event: Event) => { membershipPlanName.value = (event.target as HTMLInputElement).value } })]), h('label', { class: 'admin-form-field' }, [h('span', {}, '周期天数'), h('input', { value: membershipDuration.value, type: 'number', min: 1, required: true, 'aria-label': '周期天数', onInput: (event: Event) => { membershipDuration.value = (event.target as HTMLInputElement).value } })]), h('label', { class: 'admin-form-field' }, [h('span', {}, '价格（分）'), h('input', { value: membershipPrice.value, type: 'number', min: 1, required: true, 'aria-label': '价格（分）', onInput: (event: Event) => { membershipPrice.value = (event.target as HTMLInputElement).value } })]), h('label', { class: 'admin-form-field' }, [h('span', {}, '每日推荐票'), h('input', { value: membershipDailyTickets.value, type: 'number', min: 0, required: true, 'aria-label': '每日推荐票', onInput: (event: Event) => { membershipDailyTickets.value = (event.target as HTMLInputElement).value } })]), h('label', { class: 'admin-form-field' }, [h('span', {}, '月度章节券'), h('input', { value: membershipMonthlyTickets.value, type: 'number', min: 0, required: true, 'aria-label': '月度章节券', onInput: (event: Event) => { membershipMonthlyTickets.value = (event.target as HTMLInputElement).value } })]), h('button', { class: 'admin-action', type: 'submit' }, '保存会员计划')])])
-      if (view.value === '社区治理') return item('section', 'admin-card', [item('p', 'admin-kicker', 'GOVERNANCE'), item('h2', '', '社区与客服看板'), item('div', 'metric-strip', [item('div', '', [h('span', {}, 'CSAT 回收'), h('strong', {}, String(dashboard.value.csat_count))]), item('div', '', [h('span', {}, '作者告警'), h('strong', {}, String(dashboard.value.open_alert_count))]), item('div', '', [h('span', {}, '举报人身份'), h('strong', {}, '隔离')])]), item('p', 'admin-note', '同一内容的多次举报聚合为一个 Case；原始内容进入证据快照后受 Legal Hold 保护。')])
-      if (view.value === '财务查询') return item('section', 'admin-card', [item('p', 'admin-kicker', 'FINANCE'), item('h2', '', '支付与账务修复'), item('div', 'finance-state', [h('strong', {}, 'CREDIT_PENDING'), h('span', {}, '渠道支付成功但业务入账失败时，保留支付事实并进入对账修复。')]), h('a', { class: 'admin-action', href: '#reconciliation' }, '进入日对账')])
-      if (view.value === '风险与审批') return item('section', 'admin-card', [item('p', 'admin-kicker', 'RISK / APPROVAL'), item('h2', '', '风险和关键动作'), item('div', 'admin-list static-list', ['登录信号先 OBSERVE，再按证据冻结', '高敏访问需要独立权限与原因', '资金与参数动作使用 Maker / Checker'].map((text) => h('div', {}, text))), h('a', { class: 'admin-action', href: '#risk' }, '查看风控队列')])
-      if (view.value === '文件与审计') return item('section', 'admin-card', [item('p', 'admin-kicker', 'DATA CENTER'), item('h2', '', '只读数据与文件治理'), item('div', 'admin-list static-list', ['公开文件：公开访问', '高敏文件：短时 Signed URL + Audit', '指标修正：走对应 Domain 正式流程'].map((text) => h('div', {}, text)))])
-      return item('section', 'admin-card', [item('p', 'admin-kicker', 'PLATFORM OVERVIEW'), item('h2', '', '保持事实可追溯。'), item('p', 'admin-note', '审核、运营、治理、财务、风险与审批通过明确 Command 进入对应 Domain。'), item('div', 'quick-actions', [h('a', { class: 'admin-action', href: '?view=内容审核' }, '审核队列'), h('a', { class: 'secondary-action', href: '?view=用户%20360' }, 'User360')])])
-    }
+    function stats() { return el('section', 'stats-grid', [
+      el('article', 'stat-card coral', [el('div', 'stat-icon', '♡'), text('span', '客服满意度', 'stat-label'), text('strong', String(dashboard.value.csat_count), 'stat-value'), text('small', '仅作客服质量参考', 'stat-note')]),
+      el('article', 'stat-card mint', [el('div', 'stat-icon', '♧'), text('span', '开放告警', 'stat-label'), text('strong', String(dashboard.value.open_alert_count), 'stat-value'), text('small', '不暴露 L3 敏感细节', 'stat-note')]),
+      el('article', 'stat-card peach', [el('div', 'stat-icon', '▥'), text('span', '数据范围', 'stat-label'), text('strong', '已分配', 'stat-value accent'), text('small', '由工作人员账号决定', 'stat-note')]),
+      el('article', 'stat-card blue', [el('div', 'stat-icon', '▤'), text('span', '审批模式', 'stat-label'), text('strong', 'M / C', 'stat-value'), text('small', 'Maker / Checker（检查）', 'stat-note')]),
+    ]) }
+    function hero() { const copy: Record<string, [string, string]> = { 总览: ['运营事务总览', '当前会话只显示授权范围内的业务事实，助你高效完成审核、运营与治理工作。'], 内容审核: ['内容审核', '规范内容发布，守护社区生态，让优质内容持续生长。'], '作者与作品': ['作者与作品', '管理平台作者及其作品的审核与内容状态，保障内容生态健康有序。'], '用户 360': ['用户 360', '洞察用户全貌，支持安全、合规、精细化运营。'], 社区治理: ['社区治理', '守护内容生态，让社区更健康、更可信。'], 财务查询: ['财务查询', '查看与处理平台范围内的财务相关业务事项。'], 风险与审批: ['风险与审批', '监控风险信号，记录关键动作，保障平台安全与合规。'], 参数中心: ['参数中心', '管理系统关键参数，支撑平台业务的稳定运行。'], 会员配置: ['会员配置', '配置会员计划、价格、推荐票与章节权益，支持灵活运营。'], 文件与审计: ['文件与审计', '通过文件治理与操作审计，保障内容安全与业务合规。'], '墨笺助手': ['墨笺助手', '在授权范围内辅助检索、分析和处理运营工作。'] }; const [title, subtitle] = copy[view.value] || copy.总览; return el('section', 'hero-banner', [el('div', 'hero-copy', [text('p', view.value === '总览' ? '让优质内容生长' : '墨页运营平台', 'eyebrow'), text('h2', title, 'hero-title'), text('p', subtitle, 'hero-subtitle'), view.value === '总览' && button('开始工作  →', 'primary-button')]), el('div', 'hero-art', [el('div', 'art-window', [el('i', ''), el('i', ''), el('i', ''), el('span', '▥ 内容审核')]), el('div', 'art-ring'), el('div', 'art-leaf leaf-one'), el('div', 'art-leaf leaf-two'), el('div', 'art-note', '好内容\n成就更好的社区')])]) }
+    function toolbar(title: string, subtitle: string, actions: ReturnType<typeof h>[] = []) { return el('div', 'section-heading', [el('div', '', [text('h2', title), text('p', subtitle, 'section-subtitle')]), el('div', 'heading-actions', actions)]) }
+    function dashboardPage() { return el('div', 'dashboard-layout', [el('section', 'panel chart-panel', [toolbar('运营数据趋势', '近 7 天的核心运营数据趋势（仅展示授权范围内数据）', [h('span', { class: 'legend' }, [h('i', { class: 'orange-dot' }), '内容量', h('i', { class: 'green-dot' }), '审核量']), h('select', { class: 'select-control' }, [h('option', {}, '近7天'), h('option', {}, '近30天')])]), el('div', 'chart', [el('div', 'chart-y y1', '200'), el('div', 'chart-y y2', '150'), el('div', 'chart-y y3', '100'), el('div', 'chart-y y4', '50'), el('div', 'line orange-line'), el('div', 'line green-line'), el('div', 'chart-labels', ['04-10', '04-11', '04-12', '04-13', '04-14', '04-15', '04-16'].map((v) => text('span', v)))])]), el('section', 'panel todo-panel', [toolbar('待处理事项', '', [link('查看全部  →')]), ['待审核内容', '待处理举报', '待完成审批', '系统预警'].map((item, index) => el('div', 'todo-row', [el('span', `todo-icon t${index}`, ['▤', '▲', '♙', '●'][index]), text('span', item), text('strong', String([12, 8, 6, 3][index])), text('span', '›', 'todo-arrow')]))])]) }
+    function reviewPage() { const rows = reviews.value.length ? reviews.value : Array.from({ length: 6 }, (_, i) => ({ id: `review-${i}`, book_id: ['BK_62d05ada85274d4db0dd976427f68d73', 'BK_0214dec0da30450385ea138da2632eee', 'BK_336454ab7cdf428b81bb554e60eaccb'][i % 3], status: ['APPROVED', 'PENDING', 'REVIEWING'][i % 3], fixed_version_ids: ['v1'] })); return el('section', 'panel table-panel', [toolbar('审核队列', '查看和处理待审核的内容，确保内容符合社区规范。'), el('div', 'filter-bar', [field('书籍编号', input({ placeholder: '请输入书籍编号' })), field('审核结论', h('select', { class: 'control' }, [h('option', {}, '全部'), h('option', {}, '已通过'), h('option', {}, '待处理')])), button('查询', 'primary-button'), button('重置', 'ghost-button')]), el('div', 'data-table', [el('div', 'table-row table-head', [text('span', '书籍编号'), text('span', '审核状态'), text('span', '版本数量 / 说明'), text('span', '操作')]), ...rows.map((review) => el('div', 'table-row', [text('span', review.book_id), el('span', `status-pill ${review.status === 'APPROVED' ? 'success' : review.status === 'PENDING' ? 'warning' : 'info'}`, review.status === 'APPROVED' ? '已通过' : review.status === 'PENDING' ? '待处理' : '审核中'), text('span', `${review.fixed_version_ids.length} 个版本`), button('查看详情', 'small-button', { onClick: () => decideReview(review) })]))])]) }
+    function booksPage() { const rows = books.value.length ? books.value : [['山海之境', 'OP202401230001', '青杉墨客', '连载中'], ['长夜与星光', 'OP202401220015', '林间鹿', '待首审'], ['春日来信', 'OP202401210008', '桃子汽水', '草稿'], ['平凡的世界观', 'OP202401200022', '北岛的风', '已完结']].map((r) => ({ title: r[0], id: r[1], author_id: r[2], lifecycle: r[3], visibility: '公开' })); return el('section', 'panel table-panel', [toolbar('作者与作品清单', '共 32 条记录，展示平台的作者及其作品信息。'), el('div', 'filter-bar', [field('搜索作品、作者或作品编号', input({ placeholder: '请输入关键词' })), h('select', { class: 'control short-control' }, [h('option', {}, '全部状态')]), h('select', { class: 'control short-control' }, [h('option', {}, '全部公开范围')]), button('重置', 'ghost-button')]), el('div', 'data-table', [el('div', 'table-row table-head book-cols', ['作品名称', '作品编号', '作者名称', '作品类型', '状态', '公开范围', '更新时间', '操作'].map((x) => text('span', x))), ...rows.map((book) => el('div', 'table-row book-cols', [text('strong', book.title), text('span', book.id), text('span', book.author_id), text('span', '小说'), el('span', 'status-pill success', book.lifecycle), text('span', book.visibility), text('span', '2024-01-23 14:28'), link('查看详情  ›')]))])]) }
+    function userPage() { return el('section', 'panel query-panel', [toolbar('查询服务', '支持通过账号编号或手机号，快速查询用户相关信息。'), h('form', { class: 'query-form', onSubmit: loadUser }, [field('查询账号编号', input({ value: accountId.value, required: true, placeholder: '请输入账号编号', onInput: (e: Event) => accountId.value = (e.target as HTMLInputElement).value })), field('查询手机号', input({ value: accountPhone.value, required: true, placeholder: '请输入手机号', onInput: (e: Event) => accountPhone.value = (e.target as HTMLInputElement).value })), button('⌕  查询', 'primary-button', { type: 'submit' })]), user.value ? el('div', 'facts-grid', [el('div', '', [text('span', '手机号'), text('strong', user.value.phone)]), el('div', '', [text('span', '实名状态'), text('strong', user.value.real_name)]), el('div', '', [text('span', '资产金额'), text('strong', user.value.asset_cents === null ? '已脱敏' : `${user.value.asset_cents} 分`)])]) : el('div', 'privacy-empty', [el('div', 'privacy-icon', '♢'), text('h3', '字段默认脱敏'), text('p', '敏感字段需独立授权并保留审计记录。')])]) }
+    function governancePage() { return el('section', 'panel governance-panel', [toolbar('社区与客服看板', '聚合举报、客服和作者生态信号，保持事实可追溯。'), el('div', 'governance-grid', [['客服满意度回收', dashboard.value.csat_count, '仅作 Support QA'], ['作者告警', dashboard.value.open_alert_count, '不暴露 L3 敏感细节'], ['举报人身份', '隔离', '隐私保护']].map((v, i) => el('article', `governance-card g${i}`, [el('div', 'governance-icon', ['▰', '▲', '♙'][i]), text('span', String(v[0])), text('strong', String(v[1])), text('small', String(v[2]))]))), el('div', 'info-banner', 'ⓘ  同一内容的多次举报聚合为一个 Case；原始内容进入证据快照后受 Legal Hold 保护。')]) }
+    function financePage() { return el('section', 'panel finance-panel', [toolbar('支付与账务修复', '登记支付成功但业务入账失败的订单，跟踪处理进度，确保支付事实进入对账修复。'), el('div', 'alert-banner', [el('span', 'alert-symbol', '!'), el('div', '', [text('strong', '信用支付待处理'), text('p', '渠道支付成功但业务入账失败时，请登记相关信息，保留支付事实并进入对账修复。')])]), h('form', { class: 'query-form finance-form', onSubmit: recordCreditPending }, [field('支付单号', input({ value: creditPaymentId.value, required: true, placeholder: '请输入支付单号', onInput: (e: Event) => creditPaymentId.value = (e.target as HTMLInputElement).value })), field('账号编号', input({ value: creditAccountId.value, required: true, placeholder: '请输入账号编号', onInput: (e: Event) => creditAccountId.value = (e.target as HTMLInputElement).value })), field('金额（分）', input({ value: creditAmountCents.value, type: 'number', required: true, placeholder: '请输入金额', onInput: (e: Event) => creditAmountCents.value = (e.target as HTMLInputElement).value })), button('登记未入账', 'primary-button', { type: 'submit' })]), el('div', 'queue-section', [text('h3', '待修复队列'), creditPending.value.length ? creditPending.value.map((p) => el('div', 'queue-row', [text('strong', p.payment_id), text('span', `${p.account_id} · ${p.amount_cents} 分 · ${p.status}`), button('重试补账', 'small-button', { onClick: () => retryCreditPending(p) })])) : el('div', 'large-empty', [el('div', 'empty-icon', '▧'), text('strong', '暂无待修复记录'), text('p', '支付成功但业务入账失败的订单会进入此队列。')])]), h('form', { class: 'date-row', onSubmit: openReconciliation }, [field('业务日期', input({ value: reconciliationDate.value, type: 'date', required: true, onInput: (e: Event) => reconciliationDate.value = (e.target as HTMLInputElement).value })), button('创建日对账批次', 'secondary-button', { type: 'submit' })])]) }
+    function riskPage() { return el('section', 'panel form-panel', [toolbar('风险和关键动作', '记录风险信号与审批关键动作，支持后续追溯与审计。'), h('form', { class: 'three-form', onSubmit: observeRisk }, [field('账号编号', input({ value: riskAccountId.value, required: true, placeholder: '请输入账号编号', onInput: (e: Event) => riskAccountId.value = (e.target as HTMLInputElement).value })), field('订单编号', input({ value: riskOrderId.value, required: true, placeholder: '请输入订单编号', onInput: (e: Event) => riskOrderId.value = (e.target as HTMLInputElement).value })), field('信号类型', input({ value: riskSignalType.value, required: true, onInput: (e: Event) => riskSignalType.value = (e.target as HTMLInputElement).value })), button('记录观察', 'primary-button', { type: 'submit' })]), el('div', 'divider'), h('form', { class: 'inline-command', onSubmit: freezeRisk }, [field('风险信号编号', input({ value: riskSignalId.value, required: true, placeholder: '请输入风险信号编号', onInput: (e: Event) => riskSignalId.value = (e.target as HTMLInputElement).value })), button('冻结信号', 'secondary-button', { type: 'submit' })]), el('div', 'info-banner', 'ⓘ  登录信号先 OBSERVE，再按证据冻结；高敏访问需要独立权限与审计。')]) }
+    function parameterPage() { return el('section', 'panel form-panel', [toolbar('关键参数版本', '配置和管理系统的关键参数，修改将按流程生效。', [button('查看参数说明', 'soft-button')]), h('form', { class: 'three-form', onSubmit: draftParameter }, [field('参数键名', input({ value: key.value, required: true, onInput: (e: Event) => key.value = (e.target as HTMLInputElement).value })), field('参数值', input({ value: value.value, required: true, onInput: (e: Event) => value.value = (e.target as HTMLInputElement).value })), field('操作人员编号', input({ value: staffId.value, required: true, placeholder: '请输入操作人员编号', onInput: (e: Event) => staffId.value = (e.target as HTMLInputElement).value })), button('保存草案', 'primary-button', { type: 'submit' })]), el('div', 'workflow', ['草案', '校验', '复核', '生效', '激活'].map((v, i) => el('div', 'workflow-step', [el('span', '', String(i + 1)), text('strong', v), text('small', ['提交参数修改草案', '系统自动校验', '人工复核确认', '参数正式生效', '变更立即激活'][i])]))), rules.value.length ? el('div', 'rule-list', rules.value.map((r) => el('div', 'rule-row', [text('strong', r.code), text('span', `${r.severity} · ${r.recommended_action} · v${r.version}`)]))) : el('div', 'large-empty compact-empty', [el('div', 'empty-icon', '▧'), text('strong', '暂无配置数据'), text('p', '规则版本和参数版本在此管理。')])]) }
+    function membershipPage() { return el('section', 'panel form-panel', [toolbar('会员权益配置', '周期、价格、推荐票和章节券由运营配置，会员书库通过独立入口绑定作品。'), h('form', { class: 'membership-form', onSubmit: createMembershipPlan }, [field('计划编码', input({ value: membershipPlanCode.value, required: true, onInput: (e: Event) => membershipPlanCode.value = (e.target as HTMLInputElement).value })), field('计划名称', input({ value: membershipPlanName.value, required: true, onInput: (e: Event) => membershipPlanName.value = (e.target as HTMLInputElement).value })), field('周期天数', input({ value: membershipDuration.value, type: 'number', min: 1, required: true, onInput: (e: Event) => membershipDuration.value = (e.target as HTMLInputElement).value })), field('价格（分）', input({ value: membershipPrice.value, type: 'number', min: 1, required: true, onInput: (e: Event) => membershipPrice.value = (e.target as HTMLInputElement).value })), field('每日推荐票', input({ value: membershipDailyTickets.value, type: 'number', min: 0, required: true, onInput: (e: Event) => membershipDailyTickets.value = (e.target as HTMLInputElement).value })), field('月度章节券', input({ value: membershipMonthlyTickets.value, type: 'number', min: 0, required: true, onInput: (e: Event) => membershipMonthlyTickets.value = (e.target as HTMLInputElement).value })), button('保存会员计划', 'primary-button', { type: 'submit' })]), el('div', 'sub-form', [text('h3', '章节商业化配置'), h('form', { class: 'inline-command', onSubmit: configureCommercialPolicy }, [field('章节编号', input({ value: commercialChapterId.value, required: true, placeholder: '请输入章节编号', onInput: (e: Event) => commercialChapterId.value = (e.target as HTMLInputElement).value })), field('VIP 价格（Coin）', input({ value: commercialPriceCoin.value, type: 'number', min: 1, required: true, onInput: (e: Event) => commercialPriceCoin.value = (e.target as HTMLInputElement).value })), button('配置 VIP 章节', 'secondary-button', { type: 'submit' })])])]) }
+    function filesPage() { return el('section', 'panel form-panel', [toolbar('事件与文件治理', '检索并处理文件相关事件，支持结构化数据入队，便于后续审计与追溯。'), h('form', { class: 'files-form', onSubmit: enqueueOutbox }, [field('事件类型', input({ value: outboxEventType.value, required: true, placeholder: '请选择事件类型', onInput: (e: Event) => outboxEventType.value = (e.target as HTMLInputElement).value })), field('聚合编号', input({ value: outboxAggregateId.value, required: true, placeholder: '请输入聚合编号', onInput: (e: Event) => outboxAggregateId.value = (e.target as HTMLInputElement).value })), field('结构数据', h('textarea', { class: 'control textarea', rows: 3, value: outboxPayload.value, onInput: (e: Event) => outboxPayload.value = (e.target as HTMLTextAreaElement).value })), button('事件入队', 'primary-button', { type: 'submit' })]), el('div', 'info-banner', 'ⓘ  公开文件对外访问使用签名链接，短期授权的写入会记录至审计日志。涉及敏感的操作必须进入对应业务领域。')]) }
+    function workspace() { if (view.value === '墨笺助手') return el('section', 'panel agent-panel', [toolbar('墨笺助手', '当前 Staff 会话的查询、工具结果和高风险确认。', [button('新会话', 'ghost-button', { onClick: async () => { const created = await request<{ id: string }>('/admin/api/v1/agent/sessions', { method: 'POST', body: JSON.stringify({ title: '墨笺' }) }); agentSessionId.value = created.id; agentPending.value = null; await loadAgentSessions() } }), button('连接 Harness', 'ghost-button', { onClick: loadHarnessWeb })]), el('div', 'agent-session-strip', [text('span', '会话'), h('select', { class: 'control', value: agentSessionId.value, onChange: async (event: Event) => { agentSessionId.value = (event.target as HTMLSelectElement).value; agentPending.value = null; await loadAgentMessages() } }, agentSessionList.value.map((item) => h('option', { value: item.id }, item.title || item.id))), text('small', '权限、身份和数据范围由服务端会话决定。')]), el('div', 'agent-messages', agentMessages.value.length ? agentMessages.value.map((item) => el('div', `agent-message ${item.role}`, [text('span', item.role === 'user' ? '你' : '墨笺', 'agent-message-role'), text('p', item.content), item.tool_name ? text('small', `Tool：${item.tool_name}`, 'agent-tool-summary') : null])) : el('div', 'large-empty compact-empty', [text('strong', '等待输入'), text('p', '输入明确的查询或业务动作。')]) ), agentPending.value ? el('div', 'agent-confirmation-card', [text('strong', '需要确认的高风险动作'), text('span', `目标：${agentPending.value.tool_name}`), text('span', `影响：${agentPending.value.impact_summary}`), text('span', `风险：${agentPending.value.risk_level}`), el('div', 'heading-actions', [button('确认执行', 'primary-button', { onClick: confirmAgentAction }), button('取消', 'ghost-button', { onClick: cancelAgentAction })])]) : null, h('form', { class: 'agent-composer', onSubmit: sendAgentMessage }, [h('textarea', { class: 'control', rows: 3, value: agentInput.value, placeholder: '输入：查一下《书名》；或选择候选后说明审核动作。', onInput: (event: Event) => agentInput.value = (event.target as HTMLTextAreaElement).value }), button(agentSending.value ? '发送中…' : '发送', 'primary-button', { type: 'submit', disabled: agentSending.value })]), harnessLoading.value ? el('div', 'harness-state', [el('div', 'spinner'), text('p', '正在启动 Harness…')]) : harnessUrl.value ? h('iframe', { class: 'native-harness-frame', src: harnessUrl.value, title: 'DeepSeek Harness', allow: 'clipboard-read; clipboard-write' }) : harnessError.value ? el('div', 'harness-state', [text('p', harnessError.value)]) : null])
+      if (view.value === '内容审核') return reviewPage(); if (view.value === '作者与作品') return booksPage(); if (view.value === '用户 360') return userPage(); if (view.value === '社区治理') return governancePage(); if (view.value === '财务查询') return financePage(); if (view.value === '风险与审批') return riskPage(); if (view.value === '参数中心') return parameterPage(); if (view.value === '会员配置') return membershipPage(); if (view.value === '文件与审计') return filesPage(); return dashboardPage() }
 
-    const navigation = ['总览', '内容审核', '作者与作品', '用户 360', '社区治理', '财务查询', '风险与审批', '参数中心', '会员配置', '文件与审计']
-    return () => state.value !== 'ready' ? stateView(state.value) : item('div', 'admin-shell', [item('aside', 'admin-sidebar', [item('div', 'admin-logo', [item('strong', '', '墨页'), item('small', '', 'ADMIN CONSOLE')]), item('div', 'scope-badge', 'STAFF / ASSIGNED'), item('nav', 'admin-nav', navigation.map((label) => navLink(label, label === view.value))), item('div', 'admin-sidebar-foot', [item('span', '', 'v1.2'), navLink('退出登录', false)])]), item('div', 'admin-content', [item('header', 'admin-topbar', [item('div', '', [item('p', 'admin-kicker', 'ADMIN CONSOLE'), item('h1', '', view.value)]), item('div', 'staff-chip', [item('span', 'staff-dot', ''), '审核员 · StaffAccount'])]), item('main', 'admin-main', [item('section', 'admin-intro', [item('div', '', [item('p', 'admin-kicker', 'CONTROL PLANE'), item('h2', '', view.value === '总览' ? '运营事实总览' : view.value), item('p', '', message.value || '当前会话只显示授权范围内的业务事实。')]), item('span', 'readonly-note', 'READ / COMMAND')]), item('section', 'admin-metrics', [item('article', 'metric-card', [h('span', {}, '客服 CSAT'), h('strong', {}, String(dashboard.value.csat_count)), h('small', {}, '仅作 Support QA')]), item('article', 'metric-card', [h('span', {}, '开放告警'), h('strong', {}, String(dashboard.value.open_alert_count)), h('small', {}, '不暴露 L3 敏感细节')]), item('article', 'metric-card', [h('span', {}, '数据范围'), h('strong', {}, 'ASSIGNED'), h('small', {}, '由 StaffAccount 决定')]), item('article', 'metric-card', [h('span', {}, '审批模式'), h('strong', {}, 'M / C'), h('small', {}, 'Maker / Checker')])]), workspace(), item('div', 'admin-footnote', '只读指标不能直接改阅读量、充值额或作者收入；修正必须进入对应 Domain。')])])])
+    return () => state.value !== 'ready' ? stateView(state.value) : el('div', 'admin-shell', [
+      el('aside', 'admin-sidebar', [
+        el('div', 'brand', [el('div', 'brand-mark', '墨'), el('div', '', [text('strong', '墨页'), text('small', '运营管理平台')])]),
+        el('div', 'scope-switch', [text('span', '当前范围：'), text('strong', '已分配'), text('span', '⌄')]),
+        el('nav', 'admin-nav', navigation.map((label) => h('a', { class: ['side-link', label === view.value && 'active'], href: `?view=${encodeURIComponent(label)}` }, [el('span', 'nav-icon', navIcons[label]), text('span', label)]))),
+        el('div', 'sidebar-bottom', [text('span', '让好内容被更多人看见'), text('small', 'v1.2'), h('a', { href: '#sign-out', onClick: signOut }, '↪ 退出登录')]),
+      ]),
+      el('div', 'admin-content', [
+        el('header', 'topbar', [el('div', 'breadcrumb', [text('span', '首页'), text('span', '/'), text('strong', view.value)]), el('div', 'top-actions', [el('div', 'top-scope', '当前范围：已分配　⌄'), el('div', 'staff-user', [el('span', 'online-dot'), text('span', '审核员：工作人员账号'), text('span', '⌄')]), el('div', 'mode-pill', '可操作'), el('div', 'avatar', '工')])]),
+        el('main', 'admin-main', [
+          hero(), stats(),
+          view.value === '总览' ? dashboardPage() : workspace(),
+          view.value === '总览' && el('div', 'quick-grid', [
+            el('section', 'panel quick-panel', [toolbar('快捷操作', '进入高频工作台', []), el('div', 'quick-actions', ['内容审核', '用户 360', '风险与审批', '参数中心'].map((v) => h('a', { href: `?view=${encodeURIComponent(v)}`, class: 'quick-action' }, [el('span', 'quick-icon', navIcons[v]), text('strong', v), text('small', '进入管理工作台　›')])))]),
+            el('section', 'panel announce-panel', [toolbar('系统公告', '', [link('查看全部  →')]), ['关于优化内容审核策略的通知', '社区治理规范更新说明', '系统维护公告', '五一期询值班安排'].map((v, i) => el('div', 'announce-row', [el('span', 'orange-dot'), text('span', v), text('small', ['04-16', '04-15', '04-13', '04-10'][i])]))]),
+          ]),
+          text('p', '只读指标不能直接改阅读量、充值额或作者收入；修正必须进入对应 Domain。', 'admin-footnote'),
+        ]),
+      ]),
+    ])
   },
 })
 

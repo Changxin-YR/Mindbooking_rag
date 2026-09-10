@@ -13,8 +13,12 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("membership_accounts", sa.Column("plan_code", sa.String(64), nullable=True))
-    op.add_column("membership_library_entries", sa.Column("plan_code", sa.String(64), nullable=True))
-    op.drop_constraint("uq_membership_library_entries_book_id", "membership_library_entries", type_="unique")
+    op.add_column(
+        "membership_library_entries", sa.Column("plan_code", sa.String(64), nullable=True)
+    )
+    op.drop_constraint(
+        "uq_membership_library_entries_book_id", "membership_library_entries", type_="unique"
+    )
     op.create_unique_constraint(
         "uq_membership_library_entries_plan_book",
         "membership_library_entries",
@@ -34,8 +38,12 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("plan_code", "version"),
         sa.CheckConstraint("duration_days > 0", name="ck_membership_plan_duration_positive"),
-        sa.CheckConstraint("daily_recommend_ticket_count >= 0", name="ck_membership_plan_daily_nonnegative"),
-        sa.CheckConstraint("monthly_chapter_ticket_count >= 0", name="ck_membership_plan_monthly_nonnegative"),
+        sa.CheckConstraint(
+            "daily_recommend_ticket_count >= 0", name="ck_membership_plan_daily_nonnegative"
+        ),
+        sa.CheckConstraint(
+            "monthly_chapter_ticket_count >= 0", name="ck_membership_plan_monthly_nonnegative"
+        ),
     )
     op.create_table(
         "ticket_accounts",
@@ -60,7 +68,11 @@ def upgrade() -> None:
         sa.CheckConstraint("issued_quantity > 0", name="ck_ticket_lot_issued_positive"),
         sa.CheckConstraint("available_quantity >= 0", name="ck_ticket_lot_available_nonnegative"),
     )
-    op.create_index("ix_ticket_lots_account_spend", "ticket_lots", ["account_id", "ticket_type", "expires_at", "created_at"])
+    op.create_index(
+        "ix_ticket_lots_account_spend",
+        "ticket_lots",
+        ["account_id", "ticket_type", "expires_at", "created_at"],
+    )
     op.create_table(
         "ticket_transactions",
         sa.Column("id", sa.String(64), primary_key=True),
@@ -133,7 +145,9 @@ def upgrade() -> None:
         sa.Column("value", sa.BigInteger, nullable=False),
         sa.Column("source_ref", sa.String(128), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint("account_id", "book_id", "source", "source_ref", name="uq_fan_value_event_source"),
+        sa.UniqueConstraint(
+            "account_id", "book_id", "source", "source_ref", name="uq_fan_value_event_source"
+        ),
     )
     op.create_table(
         "fan_level_rules",
@@ -187,7 +201,9 @@ def downgrade() -> None:
     ):
         op.drop_table(table)
     op.drop_index("ix_membership_accounts_plan", table_name="membership_accounts")
-    op.drop_constraint("uq_membership_library_entries_plan_book", "membership_library_entries", type_="unique")
+    op.drop_constraint(
+        "uq_membership_library_entries_plan_book", "membership_library_entries", type_="unique"
+    )
     op.create_unique_constraint(
         "uq_membership_library_entries_book_id", "membership_library_entries", ["book_id"]
     )

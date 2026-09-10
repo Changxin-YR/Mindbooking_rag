@@ -82,6 +82,10 @@ class Chapter:
     published_version_id: str | None = None
 
 
+def is_readable_chapter(chapter: Chapter) -> bool:
+    return chapter.published_version_id is not None and chapter.title != "作品简介与来源"
+
+
 @dataclass(frozen=True, slots=True)
 class DraftSnapshot:
     id: str

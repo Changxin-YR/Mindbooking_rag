@@ -1,13 +1,16 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from novel_platform.core.auth import SessionSigner
 from novel_platform.modules.content.api import build_content_routers
 from novel_platform.modules.content.application import ContentService
 from novel_platform.modules.content.domain import BookLifecycle, BookVisibility, CommercialPolicy
 from novel_platform.modules.library.api import build_library_router
 from novel_platform.modules.library.application import EntitlementService, LibraryService
-from novel_platform.modules.membership.domain import AccessMode, ChapterPolicy
+from novel_platform.modules.membership.domain import AccessMode, ChapterPolicy, MembershipService
 from novel_platform.modules.reading.api import build_reading_router
 from novel_platform.modules.reading.application import ContentAccessService, ReadingService
 from novel_platform.modules.reading.domain import AccessResult, ProgressConflict
@@ -275,6 +278,12 @@ def test_explicit_reader_writer_admin_routes_use_dtos() -> None:
     assert client.get(f"/api/v1/books/{book_id}").status_code == 404
     content.set_book_visibility(book_id, BookVisibility.PUBLIC)
     content.publish_metadata_version(book_id, content.get_book(book_id).metadata_version_ids[0])
+    assert client.get(f"/api/v1/books/{book_id}").status_code == 404
+    volume = content.create_volume(book_id, "正文", 1)
+    chapter = content.create_chapter(volume.id, "第一章", CommercialPolicy.FREE, 1)
+    snapshot = content.save_draft(chapter.id, "正文")
+    version = content.create_chapter_version(chapter.id, snapshot.id)
+    content.publish_chapter_version(chapter.id, version.id)
     reader_response = client.get(f"/api/v1/books/{book_id}")
     assert reader_response.status_code == 200
     assert "internal_risk_score" not in reader_response.json()
@@ -353,6 +362,28 @@ def test_first_listing_rejects_two_versions_of_the_same_chapter() -> None:
         ReviewService(content).submit_first_listing(book.id, [first.id, second.id])
 
 
+def test_public_book_chapter_update_stays_public_until_human_approval() -> None:
+    content = ContentService()
+    book = content.create_book("author-1", "Book")
+    volume = content.create_volume(book.id, "Volume 1", 1)
+    chapter = content.create_chapter(volume.id, "Chapter 1", CommercialPolicy.FREE)
+    first = content.create_chapter_version(chapter.id, content.save_draft(chapter.id, "v1").id)
+    content.publish_fixed_versions(book.id, [first.id])
+    second = content.create_chapter_version(chapter.id, content.save_draft(chapter.id, "v2").id)
+    review = ReviewService(content)
+
+    submission = review.submit_chapter_update(book.id, [second.id])
+
+    assert submission.submission_type == "CHAPTER_UPDATE"
+    assert content.get_book(book.id).visibility is BookVisibility.PUBLIC
+    assert content.get_chapter(chapter.id).published_version_id == first.id
+
+    review.decide(submission.id, "reviewer-1", ReviewDecision.APPROVE)
+
+    assert content.get_book(book.id).visibility is BookVisibility.PUBLIC
+    assert content.get_chapter(chapter.id).published_version_id == second.id
+
+
 def test_reader_can_read_only_public_free_chapter() -> None:
     content = ContentService()
     app = FastAPI()
@@ -377,6 +408,139 @@ def test_reader_can_read_only_public_free_chapter() -> None:
 
     vip_response = client.get(f"/api/v1/books/{book.id}/chapters/{vip_chapter.id}")
     assert vip_response.status_code == 403
+
+
+def test_reader_lists_and_reads_multiple_published_chapters_in_order() -> None:
+    content = ContentService()
+    app = FastAPI()
+    app.include_router(build_content_routers(content)[0])
+    client = TestClient(app)
+
+    book = content.create_book("author-1", "可连续阅读的书")
+    volume = content.create_volume(book.id, "正文", 1)
+    versions = []
+    for number, text in ((1, "第一章的完整正文。"), (2, "第二章的完整正文。")):
+        chapter = content.create_chapter(volume.id, f"第{number}章", CommercialPolicy.FREE, number)
+        versions.append(
+            content.create_chapter_version(chapter.id, content.save_draft(chapter.id, text).id)
+        )
+    content.publish_fixed_versions(book.id, [version.id for version in versions])
+
+    detail = client.get(f"/api/v1/books/{book.id}")
+    assert detail.status_code == 200
+    assert [(item["number"], item["title"]) for item in detail.json()["chapters"]] == [
+        (1, "第1章"),
+        (2, "第2章"),
+    ]
+    first = client.get(f"/api/v1/books/{book.id}/chapters/{detail.json()['chapters'][0]['id']}")
+    second = client.get(f"/api/v1/books/{book.id}/chapters/{detail.json()['chapters'][1]['id']}")
+    assert first.json()["content"] == "第一章的完整正文。"
+    assert second.json()["content"] == "第二章的完整正文。"
+
+
+def test_reader_membership_access_returns_member_free_and_purchased() -> None:
+    content = ContentService()
+    book = content.create_book("author-1", "会员书")
+    volume = content.create_volume(book.id, "第一卷", 1)
+    chapter = content.create_chapter(volume.id, "VIP", CommercialPolicy.VIP)
+    version = content.create_chapter_version(chapter.id, content.save_draft(chapter.id, "vip").id)
+    content.publish_fixed_versions(book.id, [version.id])
+
+    class Commerce:
+        purchased = False
+
+        def has_entitlement(self, account_id: str, chapter_id: str) -> bool:
+            del account_id, chapter_id
+            return self.purchased
+
+    app = FastAPI()
+    app.include_router(build_content_routers(content)[0])
+    app.state.session_signer = SessionSigner("test-secret")
+    app.state.commerce_service = commerce = Commerce()
+    membership = MembershipService()
+    app.state.membership_service = membership
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {app.state.session_signer.issue('account-1')}"}
+
+    non_member = client.get(f"/api/v1/books/{book.id}/chapters/{chapter.id}", headers=headers)
+    assert non_member.status_code == 403
+    assert non_member.json()["detail"]["code"] == "VIP_REQUIRED"
+
+    membership.activate("account-1", datetime.now(UTC) + timedelta(days=1))
+    membership.add_library_book(book.id)
+    member = client.get(f"/api/v1/books/{book.id}/chapters/{chapter.id}", headers=headers)
+    assert member.status_code == 200
+    assert member.json()["access"] == "MEMBER_FREE"
+
+    commerce.purchased = True
+    purchased = client.get(f"/api/v1/books/{book.id}/chapters/{chapter.id}", headers=headers)
+    assert purchased.status_code == 200
+    assert purchased.json()["access"] == "PURCHASED"
+
+
+def test_writer_list_books_includes_private_and_public_books_for_only_author() -> None:
+    content = ContentService()
+    private = content.create_book("author-1", "Private")
+    public = content.create_book("author-1", "Public")
+    content.set_book_visibility(public.id, BookVisibility.PUBLIC)
+    content.publish_metadata_version(public.id, content.get_book(public.id).metadata_version_ids[0])
+    content.create_book("author-2", "Other")
+
+    app = FastAPI()
+    app.include_router(build_content_routers(content)[1])
+    client = TestClient(app)
+
+    response = client.get("/writer/api/v1/books", params={"author_id": "author-1"})
+    assert response.status_code == 200
+    expected = [
+        {
+            "id": book.id,
+            "title": title,
+            "lifecycle": "DRAFT",
+            "visibility": visibility,
+        }
+        for book, title, visibility in sorted(
+            (
+                (private, "Private", "PRIVATE"),
+                (public, "Public", "PUBLIC"),
+            ),
+            key=lambda item: item[0].id,
+        )
+    ]
+    assert response.json() == expected
+
+    missing_author = client.get("/writer/api/v1/books", params={"author_id": " "})
+    assert missing_author.status_code == 422
+
+
+def test_admin_list_books_returns_author_scope_facts() -> None:
+    content = ContentService()
+    first = content.create_book("author-1", "Private")
+    second = content.create_book("author-2", "Other")
+    app = FastAPI()
+    app.include_router(build_content_routers(content)[2])
+    client = TestClient(app)
+
+    response = client.get("/admin/api/v1/books")
+
+    assert response.status_code == 200
+    expected = [
+        {
+            "id": first.id,
+            "title": "Private",
+            "lifecycle": "DRAFT",
+            "visibility": "PRIVATE",
+            "author_id": "author-1",
+        },
+        {
+            "id": second.id,
+            "title": "Other",
+            "lifecycle": "DRAFT",
+            "visibility": "PRIVATE",
+            "author_id": "author-2",
+        },
+    ]
+    assert response.json() == sorted(expected, key=lambda item: item["id"])
 
 
 def test_writer_cannot_create_vip_chapter_directly() -> None:

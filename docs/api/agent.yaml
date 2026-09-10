@@ -1,0 +1,30 @@
+openapi: 3.0.3
+info:
+  title: Agent Administration API
+  version: v1
+paths:
+  /admin/api/v1/agent/harness-url:
+    get:
+      operationId: admin_get_native_harness_url
+      summary: Get the current Staff session's native DeepSeek Harness Web URL
+      responses:
+        '200': {description: Authenticated native Harness URL}
+        '401': {description: Staff session required}
+        '403': {description: Missing agent.execute permission}
+        '503': {description: Native Harness runtime unavailable}
+  /admin/api/v1/agent/audits:
+    get:
+      operationId: admin_list_agent_audits
+      summary: List append-only Agent tool audit events
+      parameters:
+        - {name: actor, in: query, schema: {type: string}}
+        - {name: tool, in: query, schema: {type: string}}
+        - {name: outcome, in: query, schema: {type: string}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+        - {name: include_arguments, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '200':
+          description: Paginated audit events
+        '401': {description: Staff session required}
+        '403': {description: Missing audit permission}

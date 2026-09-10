@@ -16,6 +16,7 @@ from novel_platform.modules.governance.domain import (
     ReconciliationBatch,
     ReconciliationDifference,
     ReconciliationItem,
+    ReconciliationStatus,
 )
 
 
@@ -33,6 +34,7 @@ class GovernanceService:
         self._emergencies: dict[str, Emergency] = {}
         self._outbox: dict[str, OutboxEvent] = {}
         self._invoices: dict[str, Invoice] = {}
+        self.repair_payment_credit: Callable[[str], object] | None = None
 
     def open_privacy_request(self, account_id: str, kind: str) -> PrivacyRequest:
         if not account_id.strip() or not kind.strip():
@@ -81,13 +83,79 @@ class GovernanceService:
     def record_payment_credit_failure(
         self, payment_id: str, account_id: str, amount_cents: int
     ) -> PaymentCreditPending:
-        if amount_cents <= 0:
+        if not payment_id.strip() or not account_id.strip() or amount_cents <= 0:
             raise ValueError("PAYMENT_AMOUNT_INVALID")
         pending = self._pending.get(payment_id)
         if pending is None:
             pending = PaymentCreditPending(_id("CREDIT"), payment_id, account_id, amount_cents)
             self._pending[payment_id] = pending
+        elif pending.account_id != account_id or pending.amount_cents != amount_cents:
+            raise ValueError("PAYMENT_CREDIT_CONFLICT")
         return pending
+
+    def list_payment_credit_pending(
+        self, status: str | None = None
+    ) -> tuple[PaymentCreditPending, ...]:
+        normalized = status.strip().upper() if status else None
+        if normalized not in {
+            None,
+            "CREDIT_PENDING",
+            "REPAIRING",
+            "REPAIR_REQUIRED",
+            "RESOLVED",
+        }:
+            raise ValueError("PAYMENT_CREDIT_STATUS_INVALID")
+        return tuple(
+            pending
+            for pending in sorted(self._pending.values(), key=lambda item: item.id)
+            if normalized is None
+            and pending.status in {"CREDIT_PENDING", "REPAIRING", "REPAIR_REQUIRED"}
+            or normalized is not None
+            and pending.status == normalized
+        )
+
+    def retry_payment_credit(self, payment_id: str, actor_id: str) -> PaymentCreditPending:
+        if not actor_id.strip():
+            raise ValueError("PAYMENT_CREDIT_ACTOR_REQUIRED")
+        try:
+            pending = self._pending[payment_id]
+        except KeyError as exc:
+            raise KeyError(payment_id) from exc
+        if pending.status == "RESOLVED":
+            return pending
+        attempted_at = datetime.now(UTC)
+        pending.attempts += 1
+        pending.last_attempted_at = attempted_at
+        pending.repair_actor_id = actor_id.strip()
+        repair = self.repair_payment_credit
+        if not callable(repair):
+            pending.status = "REPAIR_REQUIRED"
+            pending.last_error = "CREDIT_REPAIR_PORT_UNAVAILABLE"
+            return pending
+        try:
+            result = repair(payment_id)
+            if result is False:
+                raise RuntimeError("CREDIT_REPAIR_REJECTED")
+        except Exception as exc:  # noqa: BLE001 - preserve repair state for every failure
+            pending.status = "REPAIR_REQUIRED"
+            pending.last_error = str(exc) or type(exc).__name__
+            return pending
+        pending.status = "RESOLVED"
+        pending.last_error = None
+        pending.resolved_at = attempted_at
+        return pending
+
+    def auto_repair_payment_credits(self, *, limit: int = 10) -> tuple[PaymentCreditPending, ...]:
+        if not 1 <= limit <= 100:
+            raise ValueError("PAYMENT_CREDIT_REPAIR_LIMIT_INVALID")
+        pending = [
+            item
+            for item in sorted(self._pending.values(), key=lambda item: item.id)
+            if item.status == "CREDIT_PENDING"
+        ][:limit]
+        return tuple(
+            self.retry_payment_credit(item.payment_id, "system-credit-repair") for item in pending
+        )
 
     def open_reconciliation(self, business_date: str) -> ReconciliationBatch:
         existing = next(
@@ -116,6 +184,42 @@ class GovernanceService:
 
     def reconciliation_batch(self, batch_id: str) -> ReconciliationBatch:
         return self._batches[batch_id]
+
+    def list_reconciliation_batches(
+        self, status: str | None = None
+    ) -> tuple[ReconciliationBatch, ...]:
+        normalized = status.strip().upper() if status else None
+        allowed = {item.value for item in ReconciliationStatus}
+        if normalized not in {None, *allowed}:
+            raise ValueError("RECONCILIATION_STATUS_INVALID")
+        return tuple(
+            sorted(
+                (
+                    batch
+                    for batch in self._batches.values()
+                    if normalized is None or batch.status.value == normalized
+                ),
+                key=lambda item: (item.business_date, item.id),
+                reverse=True,
+            )
+        )
+
+    def mark_reconciliation_repaired(self, batch_id: str, operator_id: str) -> ReconciliationBatch:
+        if not operator_id.strip():
+            raise ValueError("RECONCILIATION_OPERATOR_REQUIRED")
+        batch = self._batches[batch_id]
+        if batch.status is ReconciliationStatus.OPEN:
+            batch.status = ReconciliationStatus.REPAIRED
+        return batch
+
+    def close_reconciliation(self, batch_id: str, operator_id: str) -> ReconciliationBatch:
+        if not operator_id.strip():
+            raise ValueError("RECONCILIATION_OPERATOR_REQUIRED")
+        batch = self._batches[batch_id]
+        if batch.status is ReconciliationStatus.OPEN:
+            raise ValueError("RECONCILIATION_REPAIR_REQUIRED")
+        batch.status = ReconciliationStatus.CLOSED
+        return batch
 
     def pause_features(self, reason: str, features: set[str], operator_id: str) -> Emergency:
         if not reason.strip() or not features or not operator_id.strip():

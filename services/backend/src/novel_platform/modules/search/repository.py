@@ -2,6 +2,7 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from threading import RLock
+from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -21,6 +22,14 @@ def _normalized(value: str) -> str:
 
 def _sortable_time(value: datetime | int) -> float | int:
     return value.timestamp() if isinstance(value, datetime) else value
+
+
+class SearchProjectionPort(Protocol):
+    """Application port for applying public content events to a search projection."""
+
+    def apply_book_index(self, event_id: str, fact: BookSearchFact) -> None: ...
+
+    def apply_book_taken_down(self, event_id: str, book_id: str) -> None: ...
 
 
 class InMemorySearchFactSource:
@@ -47,6 +56,39 @@ class InMemorySearchFactSource:
     def all(self) -> tuple[BookSearchFact, ...]:
         with self._lock:
             return tuple(self._facts.values())
+
+
+class InMemorySearchProjectionStore(InMemorySearchFactSource):
+    """Small projection store with event-level idempotency for local workers."""
+
+    def __init__(self, facts: Iterable[BookSearchFact] = ()) -> None:
+        super().__init__(facts)
+        self._processed_events: set[str] = set()
+
+    def remove(self, book_id: str) -> None:
+        with self._lock:
+            self._facts.pop(book_id, None)
+
+    def apply_book_index(self, event_id: str, fact: BookSearchFact) -> None:
+        self._apply_once(event_id, lambda: self._index(fact))
+
+    def apply_book_taken_down(self, event_id: str, book_id: str) -> None:
+        self._apply_once(event_id, lambda: self.remove(book_id))
+
+    def _index(self, fact: BookSearchFact) -> None:
+        if fact.is_public:
+            self.upsert(fact)
+        else:
+            self.remove(fact.book_id)
+
+    def _apply_once(self, event_id: str, operation: Callable[[], None]) -> None:
+        if not event_id.strip():
+            raise ValueError("SEARCH_PROJECTION_EVENT_ID_REQUIRED")
+        with self._lock:
+            if event_id in self._processed_events:
+                return
+            operation()
+            self._processed_events.add(event_id)
 
 
 class InMemorySearchAdapter(SearchPort):
@@ -200,12 +242,20 @@ class OpenSearchSearchAdapter(SearchPort):
         self._index = index
         self._timeout = timeout
         self._index_ready = False
+        self._projection_lock = RLock()
+        self._projection_facts: tuple[BookSearchFact, ...] | None = None
 
     def search(self, query: SearchQuery) -> SearchResultPage:
-        facts = tuple(fact for fact in self._facts() if fact.is_public)
-        # ponytail: rebuild the small projection per request; replace with outbox-driven indexing at scale.
-        self._ensure_index()
-        self._replace_projection(facts)
+        facts = tuple(
+            sorted(
+                (fact for fact in self._facts() if fact.is_public), key=lambda item: item.book_id
+            )
+        )
+        with self._projection_lock:
+            self._ensure_index()
+            if self._projection_facts != facts:
+                self._replace_projection(facts)
+                self._projection_facts = facts
         filters: list[dict[str, object]] = []
         for field, value in (
             ("channel", query.channel),

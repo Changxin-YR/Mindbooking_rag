@@ -1628,3 +1628,213 @@ CREATE TABLE outbox_event_deliveries (
 
 UPDATE alembic_version SET version_num='0027_mfa_review_scope' WHERE alembic_version.version_num = '0026_payout_orders';
 
+-- Running upgrade 0027_mfa_review_scope -> 0028_author_center_idempotency
+
+ALTER TABLE author_task_progress ADD COLUMN idempotency_key VARCHAR(128);
+
+CREATE UNIQUE INDEX uq_author_task_progress_idempotency ON author_task_progress (idempotency_key);
+
+UPDATE alembic_version SET version_num='0028_author_center_idempotency' WHERE alembic_version.version_num = '0027_mfa_review_scope';
+
+-- Running upgrade 0028_author_center_idempotency -> 0029_sandbox_finance_policy
+
+ALTER TABLE contract_versions ADD COLUMN policy_version VARCHAR(64) NOT NULL DEFAULT 'SANDBOX_CN_2026_V1';
+
+ALTER TABLE contract_versions ADD COLUMN tax_withholding_bps INTEGER NOT NULL DEFAULT 1000;
+
+ALTER TABLE contract_versions ADD COLUMN tax_free_threshold_cents BIGINT NOT NULL DEFAULT 100000;
+
+ALTER TABLE contract_versions ADD CONSTRAINT ck_contract_tax_withholding_bps CHECK (tax_withholding_bps BETWEEN 0 AND 10000);
+
+ALTER TABLE contract_versions ADD CONSTRAINT ck_contract_tax_free_threshold CHECK (tax_free_threshold_cents >= 0);
+
+ALTER TABLE author_revenue_entries ADD COLUMN tax_cents BIGINT;
+
+ALTER TABLE author_revenue_entries ADD COLUMN net_author_cents BIGINT;
+
+ALTER TABLE author_revenue_entries ADD COLUMN policy_version VARCHAR(64);
+
+UPDATE author_revenue_entries SET tax_cents = 0 WHERE tax_cents IS NULL;
+
+UPDATE author_revenue_entries SET net_author_cents = author_cents WHERE net_author_cents IS NULL;
+
+ALTER TABLE author_settlements ADD COLUMN gross_cents BIGINT;
+
+ALTER TABLE author_settlements ADD COLUMN tax_cents BIGINT;
+
+UPDATE author_settlements SET gross_cents = amount_cents WHERE gross_cents IS NULL;
+
+UPDATE author_settlements SET tax_cents = 0 WHERE tax_cents IS NULL;
+
+UPDATE alembic_version SET version_num='0029_sandbox_finance_policy' WHERE alembic_version.version_num = '0028_author_center_idempotency';
+
+-- Running upgrade 0029_sandbox_finance_policy -> 0030_finance_constraints
+
+ALTER TABLE author_revenue_entries ADD CONSTRAINT ck_author_revenue_tax_cents CHECK (tax_cents >= 0);
+
+ALTER TABLE author_revenue_entries ADD CONSTRAINT ck_author_revenue_net_cents CHECK (net_author_cents >= 0 AND net_author_cents <= author_cents);
+
+ALTER TABLE author_settlements ADD CONSTRAINT ck_author_settlement_gross_cents CHECK (gross_cents >= 0);
+
+ALTER TABLE author_settlements ADD CONSTRAINT ck_author_settlement_tax_cents CHECK (tax_cents >= 0 AND tax_cents <= gross_cents);
+
+UPDATE alembic_version SET version_num='0030_finance_constraints' WHERE alembic_version.version_num = '0029_sandbox_finance_policy';
+
+-- Running upgrade 0030_finance_constraints -> 0031_finance_maker_checker
+
+ALTER TABLE withdrawal_requests ADD COLUMN risk_reviewer_id VARCHAR(64);
+
+ALTER TABLE withdrawal_requests ADD COLUMN finance_reviewer_id VARCHAR(64);
+
+CREATE INDEX ix_withdrawal_requests_risk_reviewer ON withdrawal_requests (risk_reviewer_id);
+
+CREATE INDEX ix_withdrawal_requests_finance_reviewer ON withdrawal_requests (finance_reviewer_id);
+
+UPDATE alembic_version SET version_num='0031_finance_maker_checker' WHERE alembic_version.version_num = '0030_finance_constraints';
+
+-- Running upgrade 0031_finance_maker_checker -> 0032_credit_pending_lifecycle
+
+ALTER TABLE payment_credit_pending ADD COLUMN attempts INTEGER NOT NULL DEFAULT '0';
+
+ALTER TABLE payment_credit_pending ADD COLUMN last_error TEXT;
+
+ALTER TABLE payment_credit_pending ADD COLUMN last_attempted_at DATETIME;
+
+ALTER TABLE payment_credit_pending ADD COLUMN resolved_at DATETIME;
+
+ALTER TABLE payment_credit_pending ADD COLUMN repair_actor_id VARCHAR(64);
+
+CREATE INDEX ix_payment_credit_pending_status ON payment_credit_pending (status, created_at);
+
+UPDATE alembic_version SET version_num='0032_credit_pending_lifecycle' WHERE alembic_version.version_num = '0031_finance_maker_checker';
+
+-- Running upgrade 0032_credit_pending_lifecycle -> 0033_payout_provider_transaction
+
+ALTER TABLE payout_orders ADD COLUMN provider_transaction_id VARCHAR(128);
+
+ALTER TABLE payout_orders ADD CONSTRAINT uq_payout_provider_transaction UNIQUE (provider, provider_transaction_id);
+
+UPDATE alembic_version SET version_num='0033_payout_provider_transaction' WHERE alembic_version.version_num = '0032_credit_pending_lifecycle';
+
+-- Running upgrade 0033_payout_provider_transaction -> 0034_notification_read_state
+
+ALTER TABLE notifications ADD COLUMN read_at DATETIME;
+
+CREATE INDEX ix_notifications_account_read ON notifications (account_id, read_at);
+
+UPDATE alembic_version SET version_num='0034_notification_read_state' WHERE alembic_version.version_num = '0033_payout_provider_transaction';
+
+-- Running upgrade 0034_notification_read_state -> 0035_virtual_contract_document
+
+ALTER TABLE contract_versions ADD COLUMN document_text TEXT;
+
+ALTER TABLE contract_versions ADD COLUMN document_hash VARCHAR(64);
+
+UPDATE alembic_version SET version_num='0035_virtual_contract_document' WHERE alembic_version.version_num = '0034_notification_read_state';
+
+-- Running upgrade 0035_virtual_contract_document -> 0036_contract_author_signature
+
+ALTER TABLE contracts ADD COLUMN signed_by VARCHAR(64);
+
+ALTER TABLE contracts ADD COLUMN signed_at DATETIME;
+
+ALTER TABLE contracts ADD COLUMN signature_hash VARCHAR(64);
+
+UPDATE alembic_version SET version_num='0036_contract_author_signature' WHERE alembic_version.version_num = '0035_virtual_contract_document';
+
+-- Running upgrade 0036_contract_author_signature -> 0037_agent_request_id
+
+ALTER TABLE agent_audit_events ADD COLUMN request_id VARCHAR(128);
+
+UPDATE alembic_version SET version_num='0037_agent_request_id' WHERE alembic_version.version_num = '0036_contract_author_signature';
+
+-- Running upgrade 0037_agent_request_id -> 0038_account_profile
+
+ALTER TABLE platform_accounts ADD COLUMN account_no VARCHAR(32);
+
+ALTER TABLE platform_accounts ADD COLUMN nickname VARCHAR(64);
+
+ALTER TABLE platform_accounts ADD COLUMN login_name VARCHAR(32);
+
+CREATE UNIQUE INDEX uq_platform_accounts_account_no ON platform_accounts (account_no);
+
+CREATE UNIQUE INDEX uq_platform_accounts_login_name ON platform_accounts (login_name);
+
+UPDATE alembic_version SET version_num='0038_account_profile' WHERE alembic_version.version_num = '0037_agent_request_id';
+
+-- Running upgrade 0038_account_profile -> 0039_reader_preferences
+
+CREATE TABLE reading_preferences (
+    account_id VARCHAR(36) NOT NULL, 
+    preferences_json TEXT NOT NULL, 
+    PRIMARY KEY (account_id), 
+    FOREIGN KEY(account_id) REFERENCES platform_accounts (id)
+);
+
+UPDATE alembic_version SET version_num='0039_reader_preferences' WHERE alembic_version.version_num = '0038_account_profile';
+
+-- Running upgrade 0039_reader_preferences -> 0040_agent_pending_actions
+
+CREATE TABLE agent_pending_actions (
+    id VARCHAR(128) NOT NULL, 
+    actor_id VARCHAR(64) NOT NULL, 
+    session_id VARCHAR(128) NOT NULL, 
+    tool_name VARCHAR(128) NOT NULL, 
+    arguments_hash VARCHAR(64) NOT NULL, 
+    arguments_snapshot TEXT NOT NULL, 
+    risk_level VARCHAR(16) NOT NULL, 
+    impact_summary VARCHAR(255) NOT NULL, 
+    created_at DATETIME NOT NULL, 
+    expires_at DATETIME NOT NULL, 
+    status VARCHAR(16) NOT NULL, 
+    confirmed_at DATETIME, 
+    executed_at DATETIME, 
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX ix_agent_pending_actions_actor_status ON agent_pending_actions (actor_id, status);
+
+CREATE INDEX ix_agent_pending_actions_expires ON agent_pending_actions (expires_at);
+
+UPDATE alembic_version SET version_num='0040_agent_pending_actions' WHERE alembic_version.version_num = '0039_reader_preferences';
+
+-- Running upgrade 0040_agent_pending_actions -> 0041_agent_sessions
+
+CREATE TABLE agent_sessions (
+    id VARCHAR(128) NOT NULL, 
+    actor_id VARCHAR(64) NOT NULL, 
+    title VARCHAR(255), 
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE', 
+    model_provider VARCHAR(128) NOT NULL DEFAULT 'unknown', 
+    context_version INTEGER NOT NULL DEFAULT '0', 
+    context_json TEXT NOT NULL, 
+    created_at DATETIME NOT NULL, 
+    updated_at DATETIME NOT NULL, 
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX ix_agent_sessions_actor_updated ON agent_sessions (actor_id, updated_at);
+
+CREATE TABLE agent_messages (
+    id VARCHAR(128) NOT NULL, 
+    session_id VARCHAR(128) NOT NULL, 
+    `role` VARCHAR(32) NOT NULL, 
+    content TEXT NOT NULL, 
+    tool_name VARCHAR(128), 
+    created_at DATETIME NOT NULL, 
+    PRIMARY KEY (id), 
+    FOREIGN KEY(session_id) REFERENCES agent_sessions (id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_agent_messages_session_created ON agent_messages (session_id, created_at);
+
+UPDATE alembic_version SET version_num='0041_agent_sessions' WHERE alembic_version.version_num = '0040_agent_pending_actions';
+
+-- Running upgrade 0041_agent_sessions -> 0042_agent_audit_pending_action
+
+ALTER TABLE agent_audit_events ADD COLUMN pending_action_id VARCHAR(128);
+
+CREATE INDEX ix_agent_audit_events_pending_action ON agent_audit_events (pending_action_id);
+
+UPDATE alembic_version SET version_num='0042_agent_audit_pending_action' WHERE alembic_version.version_num = '0041_agent_sessions';
+

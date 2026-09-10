@@ -3,9 +3,11 @@ from collections.abc import Callable
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
+from novel_platform.core.auth import SessionClaims
 from novel_platform.core.http_auth import (
     require_account_access,
     require_session,
+    require_staff_authorization,
     require_staff_session,
 )
 from novel_platform.modules.review.application import ReviewService
@@ -13,6 +15,12 @@ from novel_platform.modules.review.domain import ReviewDecision
 
 
 class FirstListingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fixed_version_ids: list[str]
+
+
+class ChapterUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fixed_version_ids: list[str]
@@ -53,6 +61,7 @@ def build_review_routers(
     auth_required: bool = False,
     account_for_author: Callable[[str], str] | None = None,
     staff_scopes: Callable[[str], set[tuple[str, str]]] | None = None,
+    authorize_staff: Callable[[SessionClaims, str], None] | None = None,
 ) -> tuple[APIRouter, APIRouter, APIRouter]:
     reader = APIRouter(prefix="/api/v1", tags=["reader-review"])
     writer = APIRouter(prefix="/writer/api/v1", tags=["writer-review"])
@@ -96,6 +105,41 @@ def build_review_routers(
             status=submission.status.value,
         )
 
+    @writer.post(
+        "/books/{book_id}/chapter-submissions",
+        response_model=ReviewSubmissionResponse,
+        status_code=201,
+        operation_id="writer_submit_chapter_update",
+    )
+    def submit_chapter_update(
+        book_id: str,
+        payload: ChapterUpdateRequest,
+        request: Request,
+    ) -> ReviewSubmissionResponse:
+        if auth_required:
+            claims = require_session(request)
+            if account_for_author is not None:
+                try:
+                    book = service.content.get_book(book_id)
+                    require_account_access(
+                        claims, account_for_author(book.author_id), required=True
+                    )
+                except KeyError as exc:
+                    raise HTTPException(status_code=404, detail="book not found") from exc
+        try:
+            submission = service.submit_chapter_update(book_id, payload.fixed_version_ids)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="book not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return ReviewSubmissionResponse(
+            id=submission.id,
+            book_id=submission.book_id,
+            submission_type=submission.submission_type,
+            fixed_version_ids=submission.fixed_version_ids,
+            status=submission.status.value,
+        )
+
     @admin.get(
         "/reviews",
         response_model=list[ReviewSubmissionResponse],
@@ -104,6 +148,7 @@ def build_review_routers(
     def list_reviews(request: Request) -> list[ReviewSubmissionResponse]:
         if auth_required:
             claims = require_staff_session(request)
+            require_staff_authorization(request, authorize_staff, "review.read")
             if staff_scopes is None:
                 submissions = service.list_submissions()
             else:
@@ -137,6 +182,7 @@ def build_review_routers(
     ) -> ReviewDecisionResponse:
         if auth_required:
             require_staff_session(request)
+            require_staff_authorization(request, authorize_staff, "review.decide")
         try:
             record = service.decide(
                 submission_id,

@@ -3,6 +3,25 @@ info:
   title: Novel Platform Reader Experience API
   version: 0.1.0
 paths:
+  /api/v1/search:
+    get:
+      operationId: reader_search_books
+      responses:
+        '200': {description: Search results from the Reader projection}
+  /api/v1/rankings/{kind}:
+    get:
+      operationId: reader_list_ranking
+      parameters:
+        - {name: kind, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Latest public ranking snapshot}
+  /api/v1/rankings/{kind}/explanation:
+    get:
+      operationId: reader_get_ranking_explanation
+      parameters:
+        - {name: kind, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Ranking rules and snapshot metadata}
   /api/v1/books/{book_id}:
     get:
       operationId: reader_get_book_detail
@@ -11,6 +30,32 @@ paths:
       responses:
         '200': {description: Public book detail and published chapter summaries}
         '404': {description: Book is not public or does not exist}
+  /api/v1/accounts/{account_id}/reading-preferences:
+    get:
+      operationId: reader_get_reading_preferences
+      parameters:
+        - {name: account_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Persisted reader preferences}
+    put:
+      operationId: reader_update_reading_preferences
+      parameters:
+        - {name: account_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Updated reader preferences}
+  /api/v1/iam/accounts/{account_id}/profile:
+    get:
+      operationId: get_account_profile
+      parameters:
+        - {name: account_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Account public number, linked phone source, and editable profile fields}
+    patch:
+      operationId: update_account_profile
+      parameters:
+        - {name: account_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Updated account profile}
   /api/v1/books:
     get:
       operationId: reader_list_books
@@ -31,6 +76,20 @@ paths:
       responses:
         '201': {description: Rating version created}
         '422': {description: Rating eligibility or score validation failed}
+  /api/v1/books/{book_id}/chapters/{chapter_id}/tts:
+    get:
+      operationId: reader_get_chapter_tts
+      parameters:
+        - {name: book_id, in: path, required: true, schema: {type: string}}
+        - {name: chapter_id, in: path, required: true, schema: {type: string}}
+        - {name: account_id, in: query, required: false, schema: {type: string}}
+        - {name: voice, in: query, required: false, schema: {type: string, enum: [female-1, female-2, male-1, male-2], default: female-1}}
+        - {name: speed, in: query, required: false, schema: {type: number, enum: [0.75, 1.0, 1.25, 1.5, 2.0], default: 1.0}}
+      responses:
+        '200': {description: Deterministic basic TTS playback segments after chapter access check}
+        '403': {description: Chapter access denied or provider unavailable}
+        '404': {description: Book or chapter is not public}
+        '422': {description: Unsupported voice or playback speed}
   /api/v1/social/follows:
     post:
       operationId: reader_follow_target
@@ -40,6 +99,25 @@ paths:
       operationId: reader_unfollow_target
       responses:
         '204': {description: Follow relation removed}
+  /api/v1/social/follows/status:
+    get:
+      operationId: reader_follow_status
+      responses:
+        '200': {description: Current follow state}
+  /api/v1/bookshelf:
+    get:
+      operationId: reader_list_bookshelf
+      responses:
+        '200': {description: Account bookshelf entries with book projection}
+  /api/v1/support/tickets:
+    get:
+      operationId: reader_list_support_tickets
+      responses:
+        '200': {description: Account support tickets}
+    post:
+      operationId: reader_create_support_ticket
+      responses:
+        '201': {description: Support ticket created}
   /api/v1/content-corrections:
     post:
       operationId: reader_submit_correction

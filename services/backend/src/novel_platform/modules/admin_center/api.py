@@ -1,8 +1,11 @@
+from collections.abc import Callable
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import require_staff_authorization
 from novel_platform.modules.admin_center.application import AdminCenterService
 
 
@@ -51,38 +54,55 @@ class CsatBody(BaseModel):
     score: int = Field(ge=1, le=5)
 
 
-def build_admin_center_router(service: AdminCenterService) -> APIRouter:
+def build_admin_center_router(
+    service: AdminCenterService,
+    *,
+    auth_required: bool = False,
+    authorize_staff: Callable[[SessionClaims, str], None] | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/admin/api/v1", tags=["admin-center"])
 
+    def require_admin(request: Request, permission: str = "admin.access") -> None:
+        if not auth_required:
+            return
+        require_staff_authorization(request, authorize_staff, permission)
+
     @router.post("/review-rules", status_code=status.HTTP_201_CREATED)
-    def add_rule(payload: ReviewRuleBody) -> dict[str, object]:
+    def add_rule(payload: ReviewRuleBody, request: Request) -> dict[str, object]:
+        require_admin(request, "governance.write")
         return asdict(service.add_review_rule(**payload.model_dump()))
 
     @router.get("/review-rules")
-    def list_rules() -> list[dict[str, object]]:
+    def list_rules(request: Request) -> list[dict[str, object]]:
+        require_admin(request, "review.read")
         return [asdict(rule) for rule in service.list_review_rules()]
 
     @router.post("/reviewer-quality", status_code=status.HTTP_201_CREATED)
-    def reviewer_quality(payload: QualityBody) -> dict[str, object]:
+    def reviewer_quality(payload: QualityBody, request: Request) -> dict[str, object]:
+        require_admin(request, "review.decide")
         return asdict(service.record_reviewer_quality(**payload.model_dump()))
 
     @router.post("/author-alerts", status_code=status.HTTP_201_CREATED)
-    def author_alert(payload: AlertBody) -> dict[str, object]:
+    def author_alert(payload: AlertBody, request: Request) -> dict[str, object]:
+        require_admin(request, "operation.write")
         return asdict(service.create_author_alert(**payload.model_dump()))
 
     @router.post("/user-360")
-    def user360(payload: User360Body) -> dict[str, object]:
+    def user360(payload: User360Body, request: Request) -> dict[str, object]:
+        require_admin(request, "admin.access")
         try:
             return asdict(service.user360(**payload.model_dump()))
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.post("/support/tickets/{ticket_id}/csat")
-    def csat(ticket_id: str, payload: CsatBody) -> dict[str, object]:
+    def csat(ticket_id: str, payload: CsatBody, request: Request) -> dict[str, object]:
+        require_admin(request, "support.write")
         return asdict(service.record_csat(ticket_id, payload.score))
 
     @router.get("/support/dashboard")
-    def support_dashboard() -> dict[str, int]:
+    def support_dashboard(request: Request) -> dict[str, int]:
+        require_admin(request, "support.read")
         return service.support_dashboard()
 
     return router

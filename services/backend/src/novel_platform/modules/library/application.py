@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from novel_platform.modules.library.domain import BookshelfEntry, ChapterEntitlement
 
 
@@ -16,10 +18,13 @@ class EntitlementService:
 
 
 class LibraryService:
-    def __init__(self) -> None:
+    def __init__(self, book_exists: Callable[[str], bool] | None = None) -> None:
         self._entries: dict[tuple[str, str], BookshelfEntry] = {}
+        self._book_exists = book_exists
 
     def add(self, account_id: str, book_id: str, group_name: str = "default") -> BookshelfEntry:
+        if self._book_exists is not None and not self._book_exists(book_id):
+            raise KeyError(book_id)
         key = (account_id, book_id)
         self._entries[key] = BookshelfEntry(account_id, book_id, group_name)
         return self._entries[key]

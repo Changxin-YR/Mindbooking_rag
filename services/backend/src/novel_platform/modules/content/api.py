@@ -10,7 +10,11 @@ from novel_platform.core.http_auth import (
     require_staff_session,
 )
 from novel_platform.modules.content.application import ContentService
-from novel_platform.modules.content.domain import CommercialPolicy
+from novel_platform.modules.content.domain import (
+    BookLifecycle,
+    CommercialPolicy,
+    is_readable_chapter,
+)
 from novel_platform.modules.membership.domain import AccessMode, ChapterPolicy
 from novel_platform.modules.reading.application import ContentAccessService
 
@@ -33,6 +37,10 @@ class BookResponse(BaseModel):
     title: str
     lifecycle: str
     visibility: str
+
+
+class AdminBookResponse(BookResponse):
+    author_id: str
 
 
 class ReaderChapterSummary(BaseModel):
@@ -122,6 +130,7 @@ class ChapterResponse(BaseModel):
 
     id: str
     book_id: str
+    number: int
     title: str
     content: str
     commercial_policy: str
@@ -142,6 +151,12 @@ class CommercialPolicyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     price_coin: int
+
+
+class LifecycleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lifecycle: BookLifecycle
 
 
 def _book_response(content: ContentService, book_id: str, public: bool = False) -> BookResponse:
@@ -215,6 +230,20 @@ def build_content_routers(
         if authorize_staff is not None:
             authorize_staff(claims, "commerce.write")
 
+    def require_operation_write(request: Request) -> None:
+        if not auth_required:
+            return
+        claims = require_staff_session(request)
+        if authorize_staff is not None:
+            authorize_staff(claims, "operation.write")
+
+    def require_admin_read(request: Request) -> None:
+        if not auth_required:
+            return
+        claims = require_staff_session(request)
+        if authorize_staff is not None:
+            authorize_staff(claims, "admin.access")
+
     @reader.get(
         "/books/{book_id}", response_model=ReaderBookDetailResponse, operation_id="reader_get_book"
     )
@@ -224,6 +253,8 @@ def build_content_routers(
             if book.visibility.value != "PUBLIC":
                 raise KeyError(book_id)
             metadata = content.get_book_metadata(book_id, public_only=True)
+            if not any(is_readable_chapter(chapter) for chapter in content.list_chapters(book_id)):
+                raise KeyError(book_id)
             chapters = [
                 ReaderChapterSummary(
                     id=chapter.id,
@@ -264,6 +295,8 @@ def build_content_routers(
             book = content.get_book(book_id)
             if book.visibility.value != "PUBLIC":
                 raise KeyError(chapter_id)
+            if not any(is_readable_chapter(item) for item in content.list_chapters(book_id)):
+                raise KeyError(chapter_id)
             chapter = content.get_chapter_for_book(book_id, chapter_id)
             if chapter.published_version_id is None:
                 raise KeyError(chapter_id)
@@ -277,6 +310,7 @@ def build_content_routers(
             required=requires_account and session is not None,
         )
         purchased = False
+        member_free = False
         if requires_account:
             if session is None:
                 raise HTTPException(
@@ -297,6 +331,19 @@ def build_content_routers(
                     },
                 )
             purchased = bool(has_entitlement(session.account_id, chapter.id))
+            membership = getattr(request.app.state, "membership_service", None)
+            membership_access = getattr(membership, "access", None)
+            if callable(membership_access):
+                member_free = (
+                    membership_access(
+                        session.account_id,
+                        chapter.id,
+                        ChapterPolicy(1, AccessMode.VIP_REQUIRED),
+                        purchased,
+                        book_id=book_id,
+                    )
+                    is AccessMode.MEMBER_FREE
+                )
         decision = access.check(
             book_available=True,
             chapter_available=chapter.visibility_state.value == "PUBLIC",
@@ -304,7 +351,7 @@ def build_content_routers(
             policy=chapter.commercial_policy,
             purchased=purchased,
             limited_free=False,
-            member_free=False,
+            member_free=member_free,
         )
         if not decision.allowed:
             raise HTTPException(
@@ -314,6 +361,7 @@ def build_content_routers(
         return ChapterResponse(
             id=chapter.id,
             book_id=book_id,
+            number=chapter.number,
             title=chapter.title,
             content=version.content,
             commercial_policy=chapter.commercial_policy.value,
@@ -337,6 +385,62 @@ def build_content_routers(
             payload.tags,
         )
         return _book_response(content, book.id)
+
+    @writer.get("/books", response_model=list[BookResponse], operation_id="writer_list_books")
+    def writer_list_books(
+        author_id: str,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> list[BookResponse]:
+        require_writer(author_id, session)
+        try:
+            books = content.list_books_for_author(author_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return [
+            BookResponse(
+                id=book.id,
+                title=metadata.title,
+                lifecycle=book.lifecycle.value,
+                visibility=book.visibility.value,
+            )
+            for book, metadata in books
+        ]
+
+    @admin.get("/books", response_model=list[AdminBookResponse], operation_id="admin_list_books")
+    def admin_list_books(request: Request) -> list[AdminBookResponse]:
+        require_admin_read(request)
+        return [
+            AdminBookResponse(
+                id=book.id,
+                title=metadata.title,
+                lifecycle=book.lifecycle.value,
+                visibility=book.visibility.value,
+                author_id=book.author_id,
+            )
+            for book, metadata in content.list_all_books()
+        ]
+
+    @admin.patch(
+        "/books/{book_id}/lifecycle",
+        response_model=AdminBookResponse,
+        operation_id="admin_update_book_lifecycle",
+    )
+    def admin_update_book_lifecycle(
+        book_id: str, payload: LifecycleRequest, request: Request
+    ) -> AdminBookResponse:
+        require_operation_write(request)
+        try:
+            book = content.set_book_lifecycle(book_id, payload.lifecycle)
+            metadata = content.get_book_metadata(book_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="book not found") from exc
+        return AdminBookResponse(
+            id=book.id,
+            title=metadata.title,
+            lifecycle=book.lifecycle.value,
+            visibility=book.visibility.value,
+            author_id=book.author_id,
+        )
 
     @writer.post(
         "/books/{book_id}/volumes",

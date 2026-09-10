@@ -78,6 +78,36 @@ def test_staff_permission_is_enforced_at_admin_boundary(monkeypatch: pytest.Monk
     )
 
 
+def test_read_only_reviewer_cannot_write_reviewer_quality(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, app = _staff_app(monkeypatch)
+    limited = app.state.platform.create_staff("reviewer-quality-read", "editorial")
+    app.state.staff_auth.set_password(limited.id, "ReviewerQualityPassword#123")
+    app.state.platform.grant_permission(limited.id, "review.read")
+    app.state.platform.grant_data_scope(limited.id, "ALL", "*")
+    staff_token = client.post(
+        "/admin/api/v1/auth/staff/sessions",
+        json={
+            "employee_code": "reviewer-quality-read",
+            "password": "ReviewerQualityPassword#123",
+        },
+    ).json()["access_token"]
+
+    response = client.post(
+        "/admin/api/v1/reviewer-quality",
+        json={
+            "reviewer_id": "reviewer-1",
+            "accuracy_bps": 9500,
+            "false_positive_bps": 200,
+            "miss_bps": 300,
+            "overturn_bps": 100,
+            "avg_handle_seconds": 30,
+            "complaint_bps": 100,
+        },
+        headers={"Authorization": f"Bearer {staff_token}"},
+    )
+    assert response.status_code == 403
+
+
 def test_offboarded_staff_session_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _staff_app(monkeypatch)
     session = client.post(

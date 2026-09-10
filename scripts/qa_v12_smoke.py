@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import gettempdir
 from time import monotonic, sleep, time
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 
@@ -16,7 +17,7 @@ def wait_for_backend(api, timeout_seconds: float = 90) -> None:
             last_status = str(response.status)
             if response.ok:
                 return
-        except Exception as exc:
+        except (OSError, PlaywrightError) as exc:
             last_status = str(exc)
         sleep(0.5)
     raise AssertionError(f"backend did not become ready: {last_status}")
@@ -90,11 +91,8 @@ def main() -> None:
             data={"fixed_version_ids": [version.json()["id"]]},
         )
         assert submission.ok, submission.text()
-        staff_code = os.environ.get("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "")
-        staff_password = os.environ.get("STAFF_BOOTSTRAP_PASSWORD", "")
-        assert staff_code and staff_password, (
-            "set STAFF_BOOTSTRAP_EMPLOYEE_CODE and STAFF_BOOTSTRAP_PASSWORD for admin smoke"
-        )
+        staff_code = os.environ.get("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "qa-admin")
+        staff_password = os.environ.get("STAFF_BOOTSTRAP_PASSWORD", "QaAdmin#123456")
         staff_login = api.post(
             "/admin/api/v1/auth/staff/sessions",
             data={"employee_code": staff_code, "password": staff_password},
@@ -110,6 +108,13 @@ def main() -> None:
         )
         assert decision.ok
         try:
+            guest = browser.new_page()
+            guest.goto(web_base_url, wait_until="networkidle")
+            guest.get_by_role("link", name="登录", exact=True).click()
+            guest.wait_for_url("**/settings")
+            guest.get_by_label("手机号").wait_for(timeout=5000)
+            guest.close()
+
             page = browser.new_page()
             page.add_init_script(
                 "localStorage.setItem('reader-web-session', "
@@ -139,13 +144,13 @@ def main() -> None:
             page.get_by_role("button", name="加入书架").click()
             page.get_by_text("已加入书架").wait_for(timeout=5000)
             page.goto(f"{web_base_url}/library", wait_until="networkidle")
-            assert book_id in page.locator("body").inner_text()
+            assert "浏览器验收作品" in page.locator("body").inner_text()
             page.goto(f"{web_base_url}/wallet", wait_until="networkidle")
             assert "我的资产" in page.locator("body").inner_text()
             page.goto(f"{web_base_url}/support", wait_until="networkidle")
             page.get_by_label("问题描述").fill("浏览器 smoke 工单")
             page.get_by_role("button", name="提交工单").click()
-            page.get_by_text("工单已提交").wait_for(timeout=5000)
+            page.get_by_text("工单提交成功").wait_for(timeout=5000)
             page.goto(f"{web_base_url}/settings", wait_until="networkidle")
             page.get_by_label("开启未成年人保护").check()
             page.get_by_role("button", name="保存设置").click()
@@ -166,7 +171,7 @@ def main() -> None:
                 f"{web_base_url}/writer/?view=%E6%88%91%E7%9A%84%E4%BD%9C%E5%93%81",
                 wait_until="networkidle",
             )
-            assert "作品空间" in writer.locator("body").inner_text()
+            assert "创作空间" in writer.locator("body").inner_text()
             writer.get_by_label("作品名").fill("浏览器创建作品")
             writer.get_by_role("button", name="创建作品").click()
             writer.get_by_text("浏览器创建作品", exact=True).wait_for(timeout=5000)

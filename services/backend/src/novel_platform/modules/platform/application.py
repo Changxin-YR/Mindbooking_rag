@@ -95,6 +95,16 @@ class PlatformApplication:
             self.repository.permissions_for(staff_id), permission
         )
 
+    def permissions_for(self, staff_id: str) -> set[str]:
+        """Expose the authenticated Staff permission snapshot to application adapters."""
+        self._require_staff(staff_id)
+        return self.repository.permissions_for(staff_id)
+
+    def scopes_for(self, staff_id: str) -> set[tuple[str, str]]:
+        """Expose the authenticated Staff DataScope snapshot to application adapters."""
+        self._require_staff(staff_id)
+        return self.repository.scopes_for(staff_id)
+
     def require_access(
         self, staff_id: str, permission: str, scope_type: str, scope_value: str
     ) -> None:

@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from novel_platform.core.auth import SessionClaims
-from novel_platform.core.http_auth import require_session, require_staff_session
+from novel_platform.core.http_auth import require_staff_authorization
 from novel_platform.modules.platform.application import (
     AccessDeniedError,
     DuplicateStaffError,
@@ -70,10 +70,7 @@ def build_platform_router(
     def require_platform_admin(request: Request) -> None:
         if not auth_required:
             return
-        claims = require_session(request)
-        require_staff_session(request)
-        if authorize_staff is not None:
-            authorize_staff(claims, "platform.manage")
+        require_staff_authorization(request, authorize_staff, "platform.manage")
 
     @router.post(
         "/platform/staff", response_model=StaffResponse, status_code=status.HTTP_201_CREATED

@@ -1,15 +1,17 @@
+import asyncio
 from datetime import datetime
 from hashlib import sha256
 from hmac import compare_digest
 from hmac import new as hmac_new
 from time import time
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 
 from novel_platform.core.auth import SessionClaims
 from novel_platform.core.http_auth import optional_session, require_account_access
 from novel_platform.modules.commerce.application import CommerceService
+from novel_platform.modules.payment import ProviderStatus, validate_event_freshness
 
 
 class RechargeRequest(BaseModel):
@@ -62,6 +64,28 @@ class PaymentProviderEventRequest(BaseModel):
     occurred_at: datetime
     available_at: datetime
     signature: str
+
+
+class SandboxPaymentSimulationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    payment_no: str
+    status: ProviderStatus = ProviderStatus.SUCCESS
+    delay_seconds: int = 0
+    duplicate: bool = False
+
+
+class SandboxPaymentSimulationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payment_no: str
+    recharge_no: str | None = None
+    provider: str
+    event_id: str
+    status: str
+    processed: bool
+    available_at: datetime
 
 
 class WalletResponse(BaseModel):
@@ -162,6 +186,7 @@ def build_reader_router(
                 available_at=payload.available_at,
                 signature=payload.signature,
             )
+            validate_event_freshness(event, max_skew_seconds=callback_max_skew_seconds)
             handler = commerce.handle_payment_provider_event
             recharge_no = handler(event)
         except (TypeError, ValueError) as exc:
@@ -171,6 +196,77 @@ def build_reader_router(
         return PaymentCallbackResponse(
             recharge_no=str(recharge_no),
             status="PAID" if payload.status == "SUCCESS" else payload.status,
+        )
+
+    @router.post(
+        "/recharge/sandbox/simulate",
+        response_model=SandboxPaymentSimulationResponse,
+        operation_id="simulate_sandbox_payment",
+    )
+    def simulate_sandbox_payment(
+        payload: SandboxPaymentSimulationRequest,
+        background_tasks: BackgroundTasks,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> SandboxPaymentSimulationResponse:
+        require_account_access(session, payload.account_id, required=auth_required)
+        if payload.delay_seconds < 0:
+            raise HTTPException(status_code=422, detail="delay_seconds must be non-negative")
+        provider = getattr(commerce, "payment_provider", None)
+        provider_name = str(getattr(provider, "provider_name", ""))
+        if provider is None or not provider_name.startswith("SANDBOX"):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "SANDBOX_PROVIDER_UNAVAILABLE",
+                    "message": "sandbox provider required",
+                },
+            )
+        try:
+            owner, amount_cents = commerce.payment_details(payload.payment_no)
+            if owner != payload.account_id:
+                raise HTTPException(status_code=403, detail="payment does not belong to account")
+            provider.create_checkout(payload.payment_no, amount_cents, currency="CNY")
+            events = provider.simulate_callback(
+                payload.payment_no,
+                payload.status,
+                delay_seconds=payload.delay_seconds,
+                duplicate=payload.duplicate,
+            )
+        except HTTPException:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        event = events[0]
+        if payload.delay_seconds:
+
+            async def process_delayed() -> None:
+                await asyncio.sleep(payload.delay_seconds)
+                for delayed_event in events:
+                    commerce.handle_payment_provider_event(
+                        delayed_event, now=delayed_event.available_at
+                    )
+
+            background_tasks.add_task(process_delayed)
+            return SandboxPaymentSimulationResponse(
+                payment_no=payload.payment_no,
+                provider=event.provider,
+                event_id=event.event_id,
+                status=ProviderStatus.PROCESSING.value,
+                processed=False,
+                available_at=event.available_at,
+            )
+        recharge_no: str | None = None
+        for callback_event in events:
+            recharge_no = str(commerce.handle_payment_provider_event(callback_event))
+        return SandboxPaymentSimulationResponse(
+            payment_no=payload.payment_no,
+            recharge_no=recharge_no,
+            provider=event.provider,
+            event_id=event.event_id,
+            status=event.status.value,
+            processed=True,
+            available_at=event.available_at,
         )
 
     @router.post(

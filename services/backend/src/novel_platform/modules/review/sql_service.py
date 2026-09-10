@@ -97,6 +97,66 @@ class SqlReviewService(ReviewService):
         self.content.set_book_visibility(book_id, BookVisibility.PENDING_FIRST_REVIEW)
         return submission
 
+    def submit_chapter_update(self, book_id: str, fixed_version_ids: list[str]) -> ReviewSubmission:
+        book = self.content.get_book(book_id)
+        if book.visibility is not BookVisibility.PUBLIC:
+            raise ValueError("chapter update requires a public book")
+        if not fixed_version_ids:
+            raise ValueError("chapter update requires at least one fixed version")
+        if len(fixed_version_ids) != len(set(fixed_version_ids)):
+            raise ValueError("fixed chapter versions must be unique")
+        chapter_ids: set[str] = set()
+        for version_id in fixed_version_ids:
+            version = self.content.get_chapter_version(version_id)
+            chapter = self.content.get_chapter(version.chapter_id)
+            volume = self.content.get_volume(chapter.volume_id)
+            if volume.book_id != book.id:
+                raise ValueError("fixed chapter version does not belong to book")
+            if chapter.id in chapter_ids:
+                raise ValueError("chapter update allows one version per chapter")
+            chapter_ids.add(chapter.id)
+
+        submission = ReviewSubmission(
+            id=_id("SUB"),
+            book_id=book_id,
+            submission_type="CHAPTER_UPDATE",
+            fixed_version_ids=tuple(fixed_version_ids),
+        )
+        created_at = datetime.now(UTC)
+        with self.engine.begin() as connection:
+            values: dict[str, Any] = {
+                "id": submission.id,
+                "book_id": submission.book_id,
+                "submission_type": submission.submission_type,
+                "status": submission.status.value,
+            }
+            if "created_at" in self._submissions_table.c:
+                values["created_at"] = created_at
+            connection.execute(self._submissions_table.insert().values(**values))
+            connection.execute(
+                self._submission_versions.insert(),
+                [
+                    {
+                        "submission_id": submission.id,
+                        "chapter_version_id": version_id,
+                        "position": position,
+                    }
+                    for position, version_id in enumerate(fixed_version_ids)
+                ],
+            )
+            task_values: dict[str, Any] = {
+                "id": _id("TASK"),
+                "submission_id": submission.id,
+                "task_type": "HUMAN_REVIEW",
+                "status": "PENDING",
+            }
+            if "created_at" in self._tasks.c:
+                task_values["created_at"] = created_at
+            if self._assigned_staff_column is not None:
+                task_values["assigned_staff_id"] = None
+            connection.execute(self._tasks.insert().values(**task_values))
+        return submission
+
     def get_submission(self, submission_id: str) -> ReviewSubmission:
         with self.engine.begin() as connection:
             row = (

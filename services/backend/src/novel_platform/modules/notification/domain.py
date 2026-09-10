@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 
@@ -20,3 +21,8 @@ class Notification:
     category: NotificationCategory
     priority: NotificationPriority
     channels: frozenset[str]
+    read_at: datetime | None = None
+
+    @property
+    def is_read(self) -> bool:
+        return self.read_at is not None

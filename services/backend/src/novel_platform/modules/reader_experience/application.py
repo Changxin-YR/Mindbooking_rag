@@ -93,6 +93,13 @@ class ReaderExperienceService:
             )
         )
 
+    def is_following(self, account_id: str, target_type: str, target_id: str) -> bool:
+        try:
+            target = FollowTargetType(target_type)
+        except ValueError as exc:
+            raise ValueError("FOLLOW_TARGET_INVALID") from exc
+        return (account_id, target, target_id) in self._follows
+
     def add_growth(self, account_id: str, source: str, points: int) -> GrowthEvent:
         if points <= 0:
             raise ValueError("GROWTH_POINTS_INVALID")

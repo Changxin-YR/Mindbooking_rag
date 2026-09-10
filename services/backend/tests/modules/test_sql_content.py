@@ -144,6 +144,25 @@ def test_sql_content_publishes_the_fixed_version_and_keeps_it_immutable() -> Non
     assert rebuilt.get_chapter_version(version.id).content == "v1"
 
 
+def test_sql_list_books_for_author_includes_private_and_public_only_for_owner() -> None:
+    service, _ = _service()
+    private = service.create_book("author-1", "Private")
+    public = service.create_book("author-1", "Public")
+    service.set_book_visibility(public.id, BookVisibility.PUBLIC)
+    service.publish_metadata_version(public.id, service.get_book(public.id).metadata_version_ids[0])
+    service.create_book("author-2", "Other")
+
+    books = service.list_books_for_author("author-1")
+
+    assert [(book.id, metadata.title, book.visibility) for book, metadata in books] == sorted(
+        [
+            (private.id, "Private", BookVisibility.PRIVATE),
+            (public.id, "Public", BookVisibility.PUBLIC),
+        ],
+        key=lambda item: item[0],
+    )
+
+
 def test_sql_content_platform_can_change_chapter_commercial_policy() -> None:
     service, _ = _service()
     book = service.create_book("author-1", "Book")

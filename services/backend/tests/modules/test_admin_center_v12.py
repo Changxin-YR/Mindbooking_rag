@@ -1,9 +1,16 @@
 import sys
 from pathlib import Path
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
+from novel_platform.core.auth import SessionSigner
+from novel_platform.modules.admin_center.api import build_admin_center_router
 from novel_platform.modules.admin_center.application import AdminCenterService
+from novel_platform.modules.author_center.api import build_author_center_router
+from novel_platform.modules.author_center.application import AuthorCenterService
 from novel_platform.modules.risk.application import RiskService
 
 
@@ -45,3 +52,60 @@ def test_login_risk_is_observe_first_and_watchlist_release_keeps_history() -> No
     service.release_watchlist(entry.id, "manual review", "evidence-1", "case-1")
     assert not service.is_watchlisted("IP", "198.51.100.1")
     assert service.watchlist(entry.id).release_reason == "manual review"
+
+
+def test_admin_center_router_requires_staff_when_auth_is_enabled() -> None:
+    app = FastAPI()
+    app.include_router(build_admin_center_router(AdminCenterService(), auth_required=True))
+    response = TestClient(app).get("/admin/api/v1/review-rules")
+    assert response.status_code == 401
+
+
+def test_admin_center_router_rejects_staff_bearer_without_authorizer() -> None:
+    app = FastAPI()
+    signer = SessionSigner("standalone-secret", ttl_seconds=3600)
+    app.state.session_signer = signer
+    app.include_router(build_admin_center_router(AdminCenterService(), auth_required=True))
+    response = TestClient(app).get(
+        "/admin/api/v1/review-rules",
+        headers={"Authorization": f"Bearer {signer.issue_staff('staff-1')}"},
+    )
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "AUTHORIZATION_CONFIGURATION_ERROR"
+
+
+def test_admin_center_router_accepts_staff_bearer_with_authorizer() -> None:
+    app = FastAPI()
+    signer = SessionSigner("standalone-secret", ttl_seconds=3600)
+    app.state.session_signer = signer
+    calls: list[tuple[str, str]] = []
+
+    def authorize(claims, permission: str) -> None:
+        calls.append((claims.account_id, permission))
+
+    app.include_router(
+        build_admin_center_router(
+            AdminCenterService(), auth_required=True, authorize_staff=authorize
+        )
+    )
+    response = TestClient(app).get(
+        "/admin/api/v1/review-rules",
+        headers={"Authorization": f"Bearer {signer.issue_staff('staff-1')}"},
+    )
+    assert response.status_code == 200
+    assert calls == [("staff-1", "review.read")]
+
+
+def test_author_center_router_rejects_staff_bearer_without_authorizer() -> None:
+    app = FastAPI()
+    signer = SessionSigner("standalone-secret", ttl_seconds=3600)
+    app.state.session_signer = signer
+    _, admin_router = build_author_center_router(AuthorCenterService(), auth_required=True)
+    app.include_router(admin_router)
+    response = TestClient(app).post(
+        "/admin/api/v1/author-tasks",
+        json={"code": "FIRST", "title": "首章", "target": 1},
+        headers={"Authorization": f"Bearer {signer.issue_staff('staff-1')}"},
+    )
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "AUTHORIZATION_CONFIGURATION_ERROR"

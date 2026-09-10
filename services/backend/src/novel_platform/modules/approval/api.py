@@ -1,7 +1,10 @@
+from collections.abc import Callable
+
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from novel_platform.core.http_auth import require_staff_session
+from novel_platform.core.auth import SessionClaims
+from novel_platform.core.http_auth import require_staff_authorization
 from novel_platform.modules.approval.application import ApprovalService, MakerCheckerError
 from novel_platform.modules.approval.domain import ApprovalRequest, ApprovalStatus
 
@@ -35,14 +38,23 @@ def _response(approval: ApprovalRequest) -> ApprovalResponse:
     return ApprovalResponse.model_validate(approval, from_attributes=True)
 
 
-def build_approval_router(service: ApprovalService, *, auth_required: bool = False) -> APIRouter:
+def build_approval_router(
+    service: ApprovalService,
+    *,
+    auth_required: bool = False,
+    authorize_staff: Callable[[SessionClaims, str], None] | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/admin/api/v1/approvals", tags=["approval"])
+
+    def require_approval_staff(request: Request) -> SessionClaims | None:
+        if auth_required:
+            return require_staff_authorization(request, authorize_staff, "approval.write")
+        return None
 
     @router.post("", response_model=ApprovalResponse, status_code=status.HTTP_201_CREATED)
     def create_approval(payload: CreateApprovalRequest, request: Request) -> ApprovalResponse:
-        requester_id = (
-            require_staff_session(request).account_id if auth_required else payload.requester_id
-        )
+        claims = require_approval_staff(request)
+        requester_id = claims.account_id if claims is not None else payload.requester_id
         return _response(service.request(payload.action, requester_id, payload.critical))
 
     @router.post("/{approval_id}/decision", response_model=ApprovalResponse)
@@ -51,9 +63,8 @@ def build_approval_router(service: ApprovalService, *, auth_required: bool = Fal
     ) -> ApprovalResponse:
         try:
             decision = service.approve if payload.decision == "APPROVE" else service.reject
-            approver_id = (
-                require_staff_session(request).account_id if auth_required else payload.approver_id
-            )
+            claims = require_approval_staff(request)
+            approver_id = claims.account_id if claims is not None else payload.approver_id
             return _response(decision(approval_id, approver_id))
         except KeyError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="approval not found") from exc

@@ -10,6 +10,7 @@ from hmac import new as hmac_new
 from types import MappingProxyType
 from typing import Protocol
 from urllib.parse import quote
+from uuid import uuid4
 
 
 class ProviderStatus(StrEnum):
@@ -61,6 +62,34 @@ class ProviderEvent:
 
     def verify_signature(self, secret: str) -> bool:
         return compare_digest(self.signature, _event_signature(secret, self))
+
+
+def validate_event_freshness(
+    event: ProviderEvent,
+    *,
+    max_skew_seconds: int,
+    now: datetime | None = None,
+) -> None:
+    """Reject provider events outside the configured UTC clock-skew window.
+
+    ``available_at`` is deliberately not used as the event timestamp: sandbox
+    providers may delay delivery, while the signed ``occurred_at`` remains the
+    provider's source-of-truth time.  Callers that process a delayed event pass
+    the delivery time as ``now`` and therefore remain valid within the window.
+    """
+    if type(max_skew_seconds) is not int or max_skew_seconds < 0:
+        raise ValueError("PROVIDER_EVENT_SKEW_INVALID")
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    occurred = event.occurred_at
+    if occurred.tzinfo is None:
+        occurred = occurred.replace(tzinfo=UTC)
+    delta = (current - occurred).total_seconds()
+    if delta < -max_skew_seconds:
+        raise ValueError("PROVIDER_EVENT_FUTURE")
+    if delta > max_skew_seconds:
+        raise ValueError("PROVIDER_EVENT_STALE")
 
 
 class PaymentProvider(Protocol):
@@ -161,9 +190,8 @@ class _SandboxProvider:
             raise ValueError("PROVIDER_REFERENCE_NOT_FOUND") from exc
         if event_id is None:
             self._event_sequence += 1
-            reference_digest = sha256(reference_id.encode("utf-8")).hexdigest()[:24]
             normalized_event_id = (
-                f"{self.provider_name.lower()}-{reference_digest}-event-{self._event_sequence}"
+                f"{self.provider_name.lower()}-{uuid4().hex}-event-{self._event_sequence}"
             )
         else:
             normalized_event_id = _require_text(event_id, "event_id")
@@ -237,6 +265,16 @@ class SandboxPaymentProvider(_SandboxProvider):
         )
 
 
+class SandboxAlipayPaymentProvider(SandboxPaymentProvider):
+    def __init__(self, secret: str, clock: Callable[[], datetime] | None = None) -> None:
+        super().__init__(secret, provider_name="SANDBOX_ALIPAY", clock=clock)
+
+
+class SandboxWechatPaymentProvider(SandboxPaymentProvider):
+    def __init__(self, secret: str, clock: Callable[[], datetime] | None = None) -> None:
+        super().__init__(secret, provider_name="SANDBOX_WECHAT", clock=clock)
+
+
 class SandboxPayoutProvider(_SandboxProvider):
     _event_type = "PAYOUT"
 
@@ -252,6 +290,31 @@ class SandboxPayoutProvider(_SandboxProvider):
             destination=_require_text(destination, "destination"),
             created_at=created_at,
         )
+
+
+class SandboxBankPayoutProvider(SandboxPayoutProvider):
+    def __init__(self, secret: str, clock: Callable[[], datetime] | None = None) -> None:
+        super().__init__(secret, provider_name="SANDBOX_BANK", clock=clock)
+
+
+def build_payment_provider(provider_name: str, secret: str) -> PaymentProvider:
+    normalized = _require_text(provider_name, "provider_name").upper()
+    if normalized in {"SANDBOX", "SANDBOX_PAYMENT"}:
+        return SandboxPaymentProvider(secret, provider_name="SANDBOX")
+    if normalized in {"SANDBOX_ALIPAY", "ALIPAY_SANDBOX"}:
+        return SandboxAlipayPaymentProvider(secret)
+    if normalized in {"SANDBOX_WECHAT", "SANDBOX_WECHATPAY", "WECHAT_SANDBOX"}:
+        return SandboxWechatPaymentProvider(secret)
+    raise ValueError("UNSUPPORTED_PAYMENT_PROVIDER")
+
+
+def build_payout_provider(provider_name: str, secret: str) -> PayoutProvider:
+    normalized = _require_text(provider_name, "provider_name").upper()
+    if normalized in {"SANDBOX_PAYOUT", "SANDBOX"}:
+        return SandboxPayoutProvider(secret, provider_name=normalized)
+    if normalized in {"SANDBOX_BANK", "BANK_SANDBOX"}:
+        return SandboxBankPayoutProvider(secret)
+    raise ValueError("UNSUPPORTED_PAYOUT_PROVIDER")
 
 
 MockPaymentProvider = SandboxPaymentProvider

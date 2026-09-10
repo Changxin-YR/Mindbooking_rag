@@ -216,6 +216,23 @@ class SqlReaderExperienceService(ReaderExperienceService):
             )
             return tuple((str(row.target_type), str(row.target_id)) for row in rows)
 
+    def is_following(self, account_id: str, target_type: str, target_id: str) -> bool:
+        try:
+            target = FollowTargetType(target_type)
+        except ValueError as exc:
+            raise ValueError("FOLLOW_TARGET_INVALID") from exc
+        with self.engine.begin() as connection:
+            return (
+                connection.execute(
+                    sa.select(self._follows.c.id).where(
+                        self._follows.c.account_id == account_id,
+                        self._follows.c.target_type == target.value,
+                        self._follows.c.target_id == target_id,
+                    )
+                ).scalar_one_or_none()
+                is not None
+            )
+
     def add_growth(self, account_id: str, source: str, points: int) -> GrowthEvent:
         if points <= 0:
             raise ValueError("GROWTH_POINTS_INVALID")

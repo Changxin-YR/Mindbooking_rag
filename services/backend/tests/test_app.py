@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from novel_platform.main import create_app
 from novel_platform.modules.admin_center.application import AdminCenterService
 from novel_platform.modules.approval.application import ApprovalService
+from novel_platform.modules.author_center.application import AuthorCenterService
 from novel_platform.modules.author_finance.application import AuthorFinanceService
 from novel_platform.modules.commerce.application import CommerceService
 from novel_platform.modules.commerce.refund import RefundService
@@ -219,6 +220,9 @@ def test_sql_mode_wires_durable_domain_adapters(monkeypatch: pytest.MonkeyPatch)
     class MarkerOperation(OperationService):
         pass
 
+    class MarkerAuthorCenter(AuthorCenterService):
+        pass
+
     class MarkerReaderExperience(ReaderExperienceService):
         pass
 
@@ -267,6 +271,11 @@ def test_sql_mode_wires_durable_domain_adapters(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(main_module, "SqlRiskService", lambda engine: MarkerRisk())
     monkeypatch.setattr(main_module, "SqlOperationService", lambda engine: MarkerOperation())
     monkeypatch.setattr(
+        main_module,
+        "SqlAuthorCenterService",
+        lambda engine, operation: MarkerAuthorCenter(operation),
+    )
+    monkeypatch.setattr(
         main_module, "SqlReaderExperienceService", lambda engine: MarkerReaderExperience()
     )
     monkeypatch.setattr(main_module, "SqlAdminCenterService", lambda engine: MarkerAdminCenter())
@@ -295,6 +304,7 @@ def test_sql_mode_wires_durable_domain_adapters(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(app.state.author_finance_service, MarkerAuthorFinance)
     assert isinstance(app.state.risk_service, MarkerRisk)
     assert isinstance(app.state.operation_service, MarkerOperation)
+    assert isinstance(app.state.author_center_service, MarkerAuthorCenter)
     assert isinstance(app.state.reader_experience_service, MarkerReaderExperience)
     assert isinstance(app.state.admin_center_service, MarkerAdminCenter)
     assert isinstance(app.state.copyright_service, MarkerCopyright)
@@ -304,6 +314,16 @@ def test_sql_mode_wires_durable_domain_adapters(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(app.state.refund_service, MarkerRefund)
     assert isinstance(app.state.wallet_service, MarkerWallet)
     assert isinstance(app.state.commerce_service, MarkerCommerce)
+
+
+def test_create_app_wires_named_sandbox_channels(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("PAYMENT_PROVIDER", "SANDBOX_ALIPAY")
+    monkeypatch.setenv("PAYOUT_PROVIDER", "SANDBOX_BANK")
+    app = create_app()
+
+    assert app.state.commerce_service.payment_provider.provider_name == "SANDBOX_ALIPAY"
+    assert app.state.author_finance_service.payout_provider.provider_name == "SANDBOX_BANK"
 
 
 def test_create_app_mounts_governance_finance_operation_and_legal_routes(
@@ -367,12 +387,37 @@ def test_create_app_mounts_governance_finance_operation_and_legal_routes(
         headers=headers,
     )
     assert profile.status_code == 201
+    book = client.post(
+        "/writer/api/v1/books",
+        json={
+            "author_id": profile.json()["id"],
+            "title": "后台财务作品",
+            "synopsis": "用于路由挂载测试",
+        },
+        headers=headers,
+    )
+    assert book.status_code == 201
+    book_id = book.json()["id"]
     contract = client.post(
         "/writer/api/v1/finance/contracts",
-        json={"author_id": profile.json()["id"], "book_id": "book-1"},
+        json={"author_id": profile.json()["id"], "book_id": book_id},
         headers=headers,
     )
     assert contract.status_code == 201
+    assert contract.json()["policy_version"] == "SANDBOX_CN_2026_V1"
+    assert "SANDBOX_CN_2026_V1" in contract.json()["document_text"]
+    fetched_contract = client.get(
+        f"/writer/api/v1/finance/contracts/{contract.json()['id']}", headers=headers
+    )
+    assert fetched_contract.status_code == 200
+    assert fetched_contract.json()["document_hash"] == contract.json()["document_hash"]
+    contract_inbox = client.get(
+        "/admin/api/v1/finance/contracts",
+        params={"author_id": profile.json()["id"], "status": "DRAFT"},
+        headers=staff_headers,
+    )
+    assert contract_inbox.status_code == 200
+    assert [item["id"] for item in contract_inbox.json()] == [contract.json()["id"]]
     assert (
         client.post(
             "/admin/api/v1/operation/rankings",

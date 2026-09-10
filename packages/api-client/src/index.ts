@@ -42,19 +42,32 @@ export function createApiClient(options: ApiClientOptions = {}) {
     const url = baseUrl ? new URL(path, baseUrl).toString() : path
     const response = await fetcher(url, { ...requestInit, headers })
     const text = await response.text()
-    const data: unknown = text ? JSON.parse(text) : undefined
+    let data: unknown
+    if (text) {
+      try {
+        data = JSON.parse(text) as unknown
+      } catch {
+        data = undefined
+      }
+    }
 
     if (!response.ok) {
       if (isErrorEnvelope(data)) {
         throw new ApiError(response.status, data.error.code, data.error.message, data.error.request_id)
       }
-      throw new ApiError(response.status, 'HTTP_ERROR', `Request failed with status ${response.status}`)
+      throw new ApiError(
+        response.status,
+        'HTTP_ERROR',
+        `Request failed with status ${response.status}`,
+        response.headers.get('X-Request-ID') || undefined,
+      )
     }
 
     return data as T
   }
 
   return {
+    request,
     get: <T>(path: string, init?: ApiRequestInit) => request<T>(path, { ...init, method: 'GET' }),
     post: <TBody, TResponse>(path: string, body: TBody, init?: ApiRequestInit) =>
       request<TResponse>(path, { ...init, method: 'POST', body: JSON.stringify(body) }),

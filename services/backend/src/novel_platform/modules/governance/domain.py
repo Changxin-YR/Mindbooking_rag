@@ -58,13 +58,18 @@ class ParameterVersion:
     effective_at: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class PaymentCreditPending:
     id: str
     payment_id: str
     account_id: str
     amount_cents: int
     status: str = "CREDIT_PENDING"
+    attempts: int = 0
+    last_error: str | None = None
+    last_attempted_at: datetime | None = None
+    resolved_at: datetime | None = None
+    repair_actor_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

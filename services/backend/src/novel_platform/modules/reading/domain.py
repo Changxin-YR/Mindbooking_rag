@@ -18,6 +18,25 @@ class AccessDecision:
     allowed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class TtsSegment:
+    index: int
+    text: str
+    start_ms: int
+    end_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class TtsMetadata:
+    book_id: str
+    chapter_id: str
+    access: AccessResult
+    voice: str
+    speed: float
+    provider: str
+    segments: tuple[TtsSegment, ...]
+
+
 @dataclass(slots=True)
 class ReadingProgress:
     account_id: str
@@ -30,6 +49,21 @@ class ReadingProgress:
     furthest_position: int = 0
     revision: int = 0
     current_session_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReadingPreferences:
+    account_id: str
+    mode: str = "scroll"
+    font_family: str = "serif"
+    font_size: int = 18
+    font_weight: int = 400
+    line_height: float = 2.0
+    paragraph_spacing: float = 1.25
+    content_width: int = 760
+    background: str = "cream"
+    auto_scroll_speed: float = 1.0
+    auto_subscribe: bool = False
 
 
 class ProgressConflict(ValueError):

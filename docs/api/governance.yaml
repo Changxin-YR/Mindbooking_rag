@@ -106,6 +106,86 @@ paths:
     post:
       operationId: record_credit_pending
       responses: {'201': {description: Payment credit repair fact}}
+    get:
+      operationId: list_credit_pending
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: {type: string, enum: [CREDIT_PENDING, REPAIRING, REPAIR_REQUIRED, RESOLVED]}
+      responses:
+        '200':
+          description: Staff-visible payment credit repair queue
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/PaymentCreditPendingResponse'}
+  /admin/api/v1/reconciliation/credit-pending/{payment_id}/retry:
+    post:
+      operationId: retry_credit_pending
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Credit repair result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PaymentCreditPendingResponse'}
+        '404': {description: Credit repair record not found}
+        '409': {description: Repair is already running or state conflict}
+  /admin/api/v1/reconciliation/batches:
+    get:
+      operationId: list_reconciliation_batches
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: {type: string, enum: [OPEN, REPAIRED, CLOSED]}
+      responses:
+        '200':
+          description: Staff-visible daily reconciliation batches
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/ReconciliationBatchResponse'}
+    post:
+      operationId: open_reconciliation_batch
+      responses: {'201': {description: Open daily reconciliation batch}}
+  /admin/api/v1/reconciliation/batches/{batch_id}/repair:
+    post:
+      operationId: mark_reconciliation_repaired
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Reconciliation batch marked repaired
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReconciliationBatchResponse'}
+        '409': {description: Reconciliation state conflict}
+  /admin/api/v1/reconciliation/batches/{batch_id}/close:
+    post:
+      operationId: close_reconciliation_batch
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Reconciliation batch closed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReconciliationBatchResponse'}
+        '409': {description: Batch must be repaired before close}
   /api/v1/invoices:
     post:
       operationId: request_invoice
@@ -186,3 +266,37 @@ components:
         account_id: {type: string}
         signal_type: {type: string}
         order_id: {type: string}
+    PaymentCreditPendingResponse:
+      type: object
+      additionalProperties: false
+      required: [id, payment_id, account_id, amount_cents, status, attempts]
+      properties:
+        id: {type: string}
+        payment_id: {type: string}
+        account_id: {type: string}
+        amount_cents: {type: integer, minimum: 1}
+        status: {type: string, enum: [CREDIT_PENDING, REPAIRING, REPAIR_REQUIRED, RESOLVED]}
+        attempts: {type: integer, minimum: 0}
+        last_error: {type: string, nullable: true}
+        last_attempted_at: {type: string, nullable: true}
+        resolved_at: {type: string, nullable: true}
+        repair_actor_id: {type: string, nullable: true}
+    ReconciliationBatchResponse:
+      type: object
+      additionalProperties: false
+      required: [id, business_date, status, items]
+      properties:
+        id: {type: string}
+        business_date: {type: string, format: date}
+        status: {type: string, enum: [OPEN, REPAIRED, CLOSED]}
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, reference, difference, amount_cents]
+            properties:
+              id: {type: string}
+              reference: {type: string}
+              difference: {type: string}
+              amount_cents: {type: integer, minimum: 0}

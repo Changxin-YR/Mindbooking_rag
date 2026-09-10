@@ -46,6 +46,86 @@ def test_wallet_requires_bearer_session_and_rejects_other_account() -> None:
     assert other.json()["error"]["code"] == "ACCOUNT_ACCESS_DENIED"
 
 
+def test_sandbox_payment_simulation_uses_provider_callback_chain_and_ownership() -> None:
+    client = TestClient(create_app())
+    account = _register(client, "13800138009")
+    token = _login(client, "13800138009")
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (
+        client.post(
+            f"/api/v1/iam/accounts/{account}/real-name",
+            json={"name": "张三", "identity_document": "11010119900101001X"},
+            headers=headers,
+        ).status_code
+        == 201
+    )
+    recharge = client.post(
+        "/api/v1/recharge",
+        json={"account_id": account, "product_code": "RECHARGE_100", "channel": "SANDBOX"},
+        headers={**headers, "Idempotency-Key": "sandbox-payment-1"},
+    )
+    assert recharge.status_code == 200
+    payment_no = recharge.json()["payment_no"]
+    simulated = client.post(
+        "/api/v1/recharge/sandbox/simulate",
+        json={
+            "account_id": account,
+            "payment_no": payment_no,
+            "status": "SUCCESS",
+            "duplicate": True,
+        },
+        headers=headers,
+    )
+    assert simulated.status_code == 200
+    assert simulated.json()["processed"] is True
+    wallet = client.get("/api/v1/wallet", params={"account_id": account}, headers=headers)
+    assert wallet.json()["recharge_coin"] == recharge.json()["recharge_coin"]
+
+    other = _register(client, "13800138008")
+    other_token = _login(client, "13800138008")
+    forbidden = client.post(
+        "/api/v1/recharge/sandbox/simulate",
+        json={"account_id": other, "payment_no": payment_no, "status": "FAILED"},
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert forbidden.status_code == 403
+
+
+def test_writer_can_list_own_settlements_for_withdrawal_context() -> None:
+    client = TestClient(create_app())
+    account = _register(client, "13800138007")
+    token = _login(client, "13800138007")
+    headers = {"Authorization": f"Bearer {token}"}
+    profile = client.post(
+        "/writer/api/v1/author/profiles",
+        json={"account_id": account, "pen_name": "结算作者"},
+        headers=headers,
+    )
+    assert profile.status_code == 201
+    author_id = profile.json()["id"]
+    service = client.app.state.author_finance_service
+    created = service.settle(author_id, "2026-09")
+
+    response = client.get(
+        "/writer/api/v1/finance/settlements",
+        params={"author_id": author_id},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": created.id,
+            "author_id": author_id,
+            "period": "2026-09",
+            "amount_cents": 0,
+            "status": "WITHDRAWABLE",
+            "withdrawn_cents": 0,
+            "gross_cents": 0,
+            "tax_cents": 0,
+        }
+    ]
+
+
 def test_reading_progress_is_bound_to_authenticated_account() -> None:
     client = TestClient(create_app())
     account = _register(client, "13800138012")
@@ -161,6 +241,75 @@ def test_support_and_notification_actions_require_the_authenticated_account() ->
         "channels": ["IN_APP"],
     }
     assert client.post("/api/v1/notifications", json=notification).status_code == 401
+
+
+def test_notification_history_is_account_scoped_and_filterable() -> None:
+    client = TestClient(create_app())
+    account_a = _register(client, "13800138020")
+    account_b = _register(client, "13800138021")
+    token_a = _login(client, "13800138020")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    payload = {
+        "account_id": account_a,
+        "category": "SYSTEM",
+        "priority": "NORMAL",
+        "channels": ["IN_APP"],
+    }
+    assert client.post("/api/v1/notifications", json=payload, headers=headers_a).status_code == 201
+    assert (
+        client.post(
+            "/api/v1/notifications",
+            json={**payload, "category": "SECURITY", "priority": "P0"},
+            headers=headers_a,
+        ).status_code
+        == 201
+    )
+
+    own = client.get(
+        "/api/v1/notifications",
+        params={"account_id": account_a, "category": "SECURITY"},
+        headers=headers_a,
+    )
+    assert own.status_code == 200
+    assert len(own.json()) == 1
+    assert own.json()[0]["category"] == "SECURITY"
+    assert (
+        client.get(
+            "/api/v1/notifications", params={"account_id": account_b}, headers=headers_a
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            "/api/v1/notifications", params={"account_id": account_a, "limit": 0}, headers=headers_a
+        ).status_code
+        == 422
+    )
+
+    created = client.post("/api/v1/notifications", json=payload, headers=headers_a).json()
+    assert (
+        client.get(
+            "/api/v1/notifications/unread-count",
+            params={"account_id": account_a},
+            headers=headers_a,
+        ).json()["unread_count"]
+        == 3
+    )
+    marked = client.post(
+        f"/api/v1/notifications/{created['id']}/read",
+        json={"account_id": account_a},
+        headers=headers_a,
+    )
+    assert marked.status_code == 200
+    assert marked.json()["is_read"] is True
+    assert (
+        client.post(
+            f"/api/v1/notifications/{created['id']}/read",
+            json={"account_id": account_b},
+            headers=headers_a,
+        ).status_code
+        == 403
+    )
 
 
 def test_writer_content_is_bound_to_the_authenticated_author_account() -> None:
@@ -284,6 +433,38 @@ def test_writer_finance_is_bound_to_author_account(monkeypatch) -> None:
     assert response.json()["error"]["code"] == "ACCOUNT_ACCESS_DENIED"
 
 
+def test_writer_finance_contract_is_bound_to_book_author(monkeypatch) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-finance-book-bound")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
+    client = TestClient(create_app())
+    account_a = _register(client, "13800138034")
+    account_b = _register(client, "13800138035")
+    token_a = _login(client, "13800138034")
+    token_b = _login(client, "13800138035")
+    profile_a = client.post(
+        "/writer/api/v1/author/profiles",
+        json={"account_id": account_a, "pen_name": "合同作者A"},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    profile_b = client.post(
+        "/writer/api/v1/author/profiles",
+        json={"account_id": account_b, "pen_name": "合同作者B"},
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert profile_a.status_code == 201
+    assert profile_b.status_code == 201
+    other_book = client.app.state.content_service.create_book(profile_b.json()["id"], "他人作品")
+
+    response = client.post(
+        "/writer/api/v1/finance/contracts",
+        json={"author_id": profile_a.json()["id"], "book_id": other_book.id},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "AUTHOR_BOOK_ACCESS_DENIED"
+
+
 def test_writer_withdrawal_uses_server_real_name_state(monkeypatch) -> None:
     monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-withdrawal")
     monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
@@ -344,6 +525,91 @@ def test_admin_approval_uses_staff_session_identity(monkeypatch) -> None:
     )
     assert decision.status_code == 409
     assert "requester cannot approve" in decision.json()["error"]["message"]
+
+
+def test_admin_finance_mutations_require_domain_permissions(monkeypatch) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-finance-permission-boundary")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
+    client = TestClient(create_app())
+    platform = client.app.state.platform
+    staff = platform.create_staff("limited-finance", "editorial")
+    client.app.state.staff_auth.set_password(staff.id, "StaffPassword#123")
+    platform.grant_permission(staff.id, "admin.access")
+    platform.grant_data_scope(staff.id, "ALL", "*")
+    login = client.post(
+        "/admin/api/v1/auth/staff/sessions",
+        json={"employee_code": "limited-finance", "password": "StaffPassword#123"},
+    )
+    assert login.status_code == 200
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    denied = (
+        (
+            "/admin/api/v1/finance/contracts/missing/approve",
+            {"actor_id": "forged-actor"},
+        ),
+        (
+            "/admin/api/v1/finance/contracts/missing/activate",
+            {"actor_id": "forged-actor"},
+        ),
+        (
+            "/admin/api/v1/finance/revenue",
+            {
+                "author_id": "author-1",
+                "source": "TEST",
+                "source_ref": "permission-boundary",
+                "gross_cents": 100,
+            },
+        ),
+        (
+            "/admin/api/v1/finance/revenue/missing/confirm",
+            None,
+        ),
+        (
+            "/admin/api/v1/finance/settlements",
+            {"author_id": "author-1", "period": "2026-09"},
+        ),
+        (
+            "/admin/api/v1/finance/chargebacks",
+            {"source_ref": "missing", "amount_cents": 100},
+        ),
+        (
+            "/api/v1/payouts/sandbox/simulate",
+            {"payout_no": "missing"},
+        ),
+    )
+    for path, payload in denied:
+        response = client.post(path, json=payload, headers=headers)
+        assert response.status_code == 403, (path, response.text)
+        assert response.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+def test_admin_contract_actions_require_approval_permission(monkeypatch) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-contract-approval-boundary")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
+    client = TestClient(create_app())
+    platform = client.app.state.platform
+    staff = platform.create_staff("finance-without-approval", "editorial")
+    client.app.state.staff_auth.set_password(staff.id, "StaffPassword#123")
+    platform.grant_permission(staff.id, "finance.write")
+    platform.grant_data_scope(staff.id, "ALL", "*")
+    login = client.post(
+        "/admin/api/v1/auth/staff/sessions",
+        json={
+            "employee_code": "finance-without-approval",
+            "password": "StaffPassword#123",
+        },
+    )
+    assert login.status_code == 200
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    for path in (
+        "/admin/api/v1/finance/contracts/missing/approve",
+        "/admin/api/v1/finance/contracts/missing/activate",
+    ):
+        response = client.post(path, json={"actor_id": "forged-actor"}, headers=headers)
+        assert response.status_code == 403, (path, response.text)
+        assert response.json()["error"]["code"] == "PERMISSION_DENIED"
 
 
 def test_support_mutations_require_staff_or_ticket_owner(monkeypatch) -> None:
@@ -460,6 +726,213 @@ def test_author_center_routes_bind_author_id_to_session_account() -> None:
     )
 
 
+def test_author_center_funnel_binds_book_to_session_account() -> None:
+    client = TestClient(create_app())
+    _register(client, "13800138053")
+    account_b = _register(client, "13800138054")
+    token_a = _login(client, "13800138053")
+    token_b = _login(client, "13800138054")
+    author = client.post(
+        "/writer/api/v1/author/profiles",
+        json={"account_id": account_b, "pen_name": "漏斗边界"},
+        headers={"Authorization": f"Bearer {token_b}"},
+    ).json()
+    book = client.post(
+        "/writer/api/v1/books",
+        json={"author_id": author["id"], "title": "漏斗作品"},
+        headers={"Authorization": f"Bearer {token_b}"},
+    ).json()
+
+    response = client.post(
+        f"/writer/api/v1/books/{book['id']}/chapters/chapter-1/funnel",
+        json={
+            "entrants": 100,
+            "completion_bps": 7000,
+            "next_chapter_bps": 4000,
+            "subscription_bps": 1000,
+        },
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert response.status_code == 403
+
+
+def test_author_center_funnel_rejects_chapter_from_another_book() -> None:
+    client = TestClient(create_app())
+    account = _register(client, "13800138055")
+    token = _login(client, "13800138055")
+    headers = {"Authorization": f"Bearer {token}"}
+    profile = client.post(
+        "/writer/api/v1/author/profiles",
+        json={"account_id": account, "pen_name": "章节归属"},
+        headers=headers,
+    ).json()
+    first_book = client.post(
+        "/writer/api/v1/books",
+        json={"author_id": profile["id"], "title": "第一本"},
+        headers=headers,
+    ).json()
+    second_book = client.post(
+        "/writer/api/v1/books",
+        json={"author_id": profile["id"], "title": "第二本"},
+        headers=headers,
+    ).json()
+    volume = client.post(
+        f"/writer/api/v1/books/{second_book['id']}/volumes",
+        json={"title": "第二卷", "number": 1},
+        headers=headers,
+    ).json()
+    chapter = client.post(
+        f"/writer/api/v1/volumes/{volume['id']}/chapters",
+        json={"title": "第二本第一章", "number": 1},
+        headers=headers,
+    ).json()
+
+    response = client.post(
+        f"/writer/api/v1/books/{first_book['id']}/chapters/{chapter['id']}/funnel",
+        json={
+            "entrants": 100,
+            "completion_bps": 7000,
+            "next_chapter_bps": 4000,
+            "subscription_bps": 1000,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 404
+
+
+def test_author_center_task_progress_rejects_mismatched_path_author() -> None:
+    client = TestClient(create_app())
+    account = _register(client, "13800138056")
+    token = _login(client, "13800138056")
+    headers = {"Authorization": f"Bearer {token}"}
+    profile = client.post(
+        "/writer/api/v1/author/profiles",
+        json={"account_id": account, "pen_name": "任务归属"},
+        headers=headers,
+    ).json()
+    # The service is used here to create a valid task without widening the writer API surface.
+    task = client.app.state.author_center_service.create_task("TASK-BOUNDARY", "任务", 1)
+    response = client.post(
+        f"/writer/api/v1/authors/another-author/tasks/{task.id}/progress",
+        json={"author_id": profile["id"], "progress": 1, "idempotency_key": "path-mismatch"},
+        headers=headers,
+    )
+    assert response.status_code == 403
+
+
+def test_author_center_admin_writes_require_staff_session() -> None:
+    client = TestClient(create_app())
+    response = client.post(
+        "/admin/api/v1/author-tasks/",
+        json={"code": "TASK", "title": "任务", "target": 1},
+    )
+    assert response.status_code == 401
+
+
+def test_author_center_admin_writes_require_operation_permission(monkeypatch) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-author-center-permission")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
+    client = TestClient(create_app())
+    platform = client.app.state.platform
+    staff = platform.create_staff("limited-author-center", "editorial")
+    client.app.state.staff_auth.set_password(staff.id, "StaffPassword#123")
+    platform.grant_permission(staff.id, "admin.access")
+    platform.grant_data_scope(staff.id, "ALL", "*")
+    login = client.post(
+        "/admin/api/v1/auth/staff/sessions",
+        json={"employee_code": "limited-author-center", "password": "StaffPassword#123"},
+    )
+    assert login.status_code == 200
+    response = client.post(
+        "/admin/api/v1/author-tasks",
+        json={"code": "TASK", "title": "任务", "target": 1},
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+def test_author_center_admin_writes_accept_operation_role_without_admin_access(monkeypatch) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-author-center-role")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
+    client = TestClient(create_app())
+    platform = client.app.state.platform
+    staff = platform.create_staff("operation-author-center", "editorial")
+    client.app.state.staff_auth.set_password(staff.id, "StaffPassword#123")
+    platform.grant_permission(staff.id, "operation.write")
+    platform.grant_data_scope(staff.id, "ALL", "*")
+    login = client.post(
+        "/admin/api/v1/auth/staff/sessions",
+        json={"employee_code": "operation-author-center", "password": "StaffPassword#123"},
+    )
+    assert login.status_code == 200
+    response = client.post(
+        "/admin/api/v1/author-tasks/",
+        json={"code": "TASK", "title": "任务", "target": 1},
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+    assert response.status_code == 201
+
+
+def test_admin_center_rule_writes_require_review_permission(monkeypatch) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-admin-center-permission")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
+    client = TestClient(create_app())
+    platform = client.app.state.platform
+    staff = platform.create_staff("limited-admin-center", "editorial")
+    client.app.state.staff_auth.set_password(staff.id, "StaffPassword#123")
+    platform.grant_permission(staff.id, "admin.access")
+    platform.grant_data_scope(staff.id, "ALL", "*")
+    login = client.post(
+        "/admin/api/v1/auth/staff/sessions",
+        json={"employee_code": "limited-admin-center", "password": "StaffPassword#123"},
+    )
+    assert login.status_code == 200
+    response = client.post(
+        "/admin/api/v1/review-rules",
+        json={
+            "code": "SPAM",
+            "severity": "MEDIUM",
+            "recommended_action": "HOLD",
+            "auto_block_policy": False,
+            "subject_types": ["COMMENT"],
+            "version": "2026-09",
+        },
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+def test_admin_center_rule_writes_accept_governance_role_without_admin_access(monkeypatch) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-admin-center-role")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
+    client = TestClient(create_app())
+    platform = client.app.state.platform
+    staff = platform.create_staff("governance-admin-center", "editorial")
+    client.app.state.staff_auth.set_password(staff.id, "StaffPassword#123")
+    platform.grant_permission(staff.id, "governance.write")
+    platform.grant_data_scope(staff.id, "ALL", "*")
+    login = client.post(
+        "/admin/api/v1/auth/staff/sessions",
+        json={"employee_code": "governance-admin-center", "password": "StaffPassword#123"},
+    )
+    assert login.status_code == 200
+    response = client.post(
+        "/admin/api/v1/review-rules",
+        json={
+            "code": "SPAM",
+            "severity": "MEDIUM",
+            "recommended_action": "HOLD",
+            "auto_block_policy": False,
+            "subject_types": ["COMMENT"],
+            "version": "2026-09",
+        },
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+    assert response.status_code == 201
+
+
 def test_phone_account_listing_requires_a_linked_authenticated_identity() -> None:
     client = TestClient(create_app())
     _register(client, "13800138051")
@@ -474,3 +947,38 @@ def test_phone_account_listing_requires_a_linked_authenticated_identity() -> Non
         ).status_code
         == 403
     )
+
+
+def test_invoice_mutations_use_finance_permission(monkeypatch) -> None:
+    monkeypatch.setenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "ops-invoice-permission")
+    monkeypatch.setenv("STAFF_BOOTSTRAP_PASSWORD", "StaffPassword#123")
+    client = TestClient(create_app())
+    platform = client.app.state.platform
+
+    finance_staff = platform.create_staff("invoice-finance-only", "editorial")
+    client.app.state.staff_auth.set_password(finance_staff.id, "StaffPassword#123")
+    platform.grant_permission(finance_staff.id, "finance.write")
+    platform.grant_data_scope(finance_staff.id, "ALL", "*")
+
+    governance_staff = platform.create_staff("invoice-governance-only", "editorial")
+    client.app.state.staff_auth.set_password(governance_staff.id, "StaffPassword#123")
+    platform.grant_permission(governance_staff.id, "governance.write")
+    platform.grant_data_scope(governance_staff.id, "ALL", "*")
+
+    def login(employee_code: str) -> dict[str, str]:
+        response = client.post(
+            "/admin/api/v1/auth/staff/sessions",
+            json={"employee_code": employee_code, "password": "StaffPassword#123"},
+        )
+        assert response.status_code == 200
+        return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    finance_headers = login("invoice-finance-only")
+    governance_headers = login("invoice-governance-only")
+    for action in ("issue", "reverse"):
+        path = f"/admin/api/v1/invoices/missing/{action}"
+        payload = {"document_id": f"invoice-{action}"}
+        assert client.post(path, json=payload, headers=finance_headers).status_code == 404
+        denied = client.post(path, json=payload, headers=governance_headers)
+        assert denied.status_code == 403
+        assert denied.json()["error"]["code"] == "PERMISSION_DENIED"

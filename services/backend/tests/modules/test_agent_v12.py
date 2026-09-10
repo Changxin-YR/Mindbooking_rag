@@ -6,7 +6,6 @@ from novel_platform.modules.agent.application import (
     ConfirmationRequired,
     InMemoryAgentAuditLog,
     PermissionDenied,
-    WriteToolRejected,
 )
 
 
@@ -79,7 +78,35 @@ def test_tool_requires_permission_and_audits_denial() -> None:
     assert audit.records[-1].reason == "permission_denied"
 
 
-def test_high_risk_write_requires_confirmation_and_never_calls_business_write() -> None:
+def test_low_risk_write_calls_business_service_callback() -> None:
+    audit = InMemoryAgentAuditLog()
+    gateway = AgentGateway(Permissions({"review.decide"}), audit)
+    calls: list[dict[str, object]] = []
+    gateway.register(
+        ToolResource(
+            name="review.decide",
+            description="Record a review decision through ReviewService",
+            permission="review.decide",
+            read_only=False,
+        ),
+        lambda arguments: calls.append(arguments) or {"decision_id": "DEC_1"},
+    )
+
+    result = gateway.execute(
+        AgentToolCall(
+            agent_id="agent-1",
+            actor_id="staff-1",
+            tool_name="review.decide",
+            arguments={"submission_id": "SUB_1", "decision": "RETURN_FOR_CHANGES"},
+        )
+    )
+
+    assert result.data == {"decision_id": "DEC_1"}
+    assert calls == [{"submission_id": "SUB_1", "decision": "RETURN_FOR_CHANGES"}]
+    assert audit.records[-1].outcome == "SUCCESS"
+
+
+def test_high_risk_write_requires_verified_confirmation_and_never_calls_business_write() -> None:
     audit = InMemoryAgentAuditLog()
     gateway = AgentGateway(Permissions({"wallet.adjust"}), audit)
     calls: list[dict[str, object]] = []
@@ -106,7 +133,7 @@ def test_high_risk_write_requires_confirmation_and_never_calls_business_write() 
     assert calls == []
     assert audit.records[-1].reason == "confirmation_required"
 
-    with pytest.raises(WriteToolRejected):
+    with pytest.raises(ConfirmationRequired):
         gateway.execute(
             AgentToolCall(
                 agent_id="agent-1",
@@ -117,4 +144,4 @@ def test_high_risk_write_requires_confirmation_and_never_calls_business_write() 
         )
 
     assert calls == []
-    assert audit.records[-1].reason == "write_tools_not_supported"
+    assert audit.records[-1].reason == "confirmation_required"

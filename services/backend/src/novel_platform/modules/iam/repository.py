@@ -15,6 +15,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from novel_platform.modules.iam.domain import (
+    AccountLoginNameTakenError,
     AccountRealNameLink,
     AccountStatus,
     IdentityType,
@@ -22,6 +23,7 @@ from novel_platform.modules.iam.domain import (
     PlatformAccount,
     RealNameSlotStatus,
     RealNameSubject,
+    public_account_no,
 )
 
 
@@ -29,6 +31,14 @@ class IdentityRepository(Protocol):
     def get_or_create_phone_identity(self, phone: str) -> LoginIdentity: ...
 
     def create_account(self) -> PlatformAccount: ...
+
+    def account_for_id(self, account_id: str) -> PlatformAccount | None: ...
+
+    def phone_for_account(self, account_id: str) -> str | None: ...
+
+    def update_account_profile(
+        self, account_id: str, *, nickname: str | None = None, login_name: str | None = None
+    ) -> PlatformAccount: ...
 
     def link_account(self, identity_id: str, account_id: str) -> None: ...
 
@@ -85,9 +95,47 @@ class InMemoryIdentityRepository:
 
     def create_account(self) -> PlatformAccount:
         with self._guard:
-            account = PlatformAccount(uuid4().hex, AccountStatus.ACTIVE)
+            account_id = uuid4().hex
+            account = PlatformAccount(
+                account_id, AccountStatus.ACTIVE, public_account_no(account_id)
+            )
             self._accounts[account.id] = account
             return account
+
+    def account_for_id(self, account_id: str) -> PlatformAccount | None:
+        with self._guard:
+            return self._accounts.get(account_id)
+
+    def phone_for_account(self, account_id: str) -> str | None:
+        with self._guard:
+            for identity_id, account_ids in self._accounts_by_identity.items():
+                if account_id in account_ids:
+                    for phone, identity in self._identity_by_phone.items():
+                        if identity.id == identity_id:
+                            return phone
+        return None
+
+    def update_account_profile(
+        self, account_id: str, *, nickname: str | None = None, login_name: str | None = None
+    ) -> PlatformAccount:
+        with self._guard:
+            account = self._accounts.get(account_id)
+            if account is None:
+                raise KeyError(account_id)
+            normalized_login_name = login_name.lower() if login_name is not None else None
+            if normalized_login_name is not None:
+                for existing in self._accounts.values():
+                    if existing.id != account_id and existing.login_name == normalized_login_name:
+                        raise AccountLoginNameTakenError("login_name is already in use")
+            updated = PlatformAccount(
+                account.id,
+                account.status,
+                account.account_no or public_account_no(account.id),
+                account.nickname if nickname is None else nickname,
+                account.login_name if normalized_login_name is None else normalized_login_name,
+            )
+            self._accounts[account_id] = updated
+            return updated
 
     def link_account(self, identity_id: str, account_id: str) -> None:
         with self._guard:
@@ -191,6 +239,9 @@ platform_accounts = sa.table(
     "platform_accounts",
     sa.column("id", sa.String),
     sa.column("status", sa.String),
+    sa.column("account_no", sa.String),
+    sa.column("nickname", sa.String),
+    sa.column("login_name", sa.String),
 )
 login_identity_accounts = sa.table(
     "login_identity_accounts",
@@ -292,12 +343,102 @@ class SqlIdentityRepository:
             )
 
     def create_account(self) -> PlatformAccount:
-        account = PlatformAccount(uuid4().hex, AccountStatus.ACTIVE)
+        account_id = uuid4().hex
+        account = PlatformAccount(account_id, AccountStatus.ACTIVE, public_account_no(account_id))
         with self.engine.begin() as connection:
             connection.execute(
-                platform_accounts.insert().values(id=account.id, status=account.status.value)
+                platform_accounts.insert().values(
+                    id=account.id,
+                    status=account.status.value,
+                    account_no=account.account_no,
+                )
             )
         return account
+
+    def account_for_id(self, account_id: str) -> PlatformAccount | None:
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    sa.select(
+                        platform_accounts.c.id,
+                        platform_accounts.c.status,
+                        platform_accounts.c.account_no,
+                        platform_accounts.c.nickname,
+                        platform_accounts.c.login_name,
+                    ).where(platform_accounts.c.id == account_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            account_no = str(row["account_no"] or public_account_no(account_id))
+            if row["account_no"] is None:
+                connection.execute(
+                    platform_accounts.update()
+                    .where(platform_accounts.c.id == account_id)
+                    .values(account_no=account_no)
+                )
+            return PlatformAccount(
+                str(row["id"]),
+                AccountStatus(str(row["status"])),
+                account_no,
+                str(row["nickname"]) if row["nickname"] is not None else None,
+                str(row["login_name"]) if row["login_name"] is not None else None,
+            )
+
+    def phone_for_account(self, account_id: str) -> str | None:
+        with self.engine.begin() as connection:
+            return connection.execute(
+                sa.select(login_identities.c.normalized_value)
+                .select_from(
+                    login_identities.join(
+                        login_identity_accounts,
+                        login_identities.c.id == login_identity_accounts.c.identity_id,
+                    )
+                )
+                .where(login_identity_accounts.c.account_id == account_id)
+                .order_by(login_identities.c.id)
+                .limit(1)
+            ).scalar_one_or_none()
+
+    def update_account_profile(
+        self, account_id: str, *, nickname: str | None = None, login_name: str | None = None
+    ) -> PlatformAccount:
+        normalized_login_name = login_name.lower() if login_name is not None else None
+        try:
+            with self.engine.begin() as connection:
+                exists = connection.execute(
+                    sa.select(platform_accounts.c.id).where(platform_accounts.c.id == account_id)
+                ).scalar_one_or_none()
+                if exists is None:
+                    raise KeyError(account_id)
+                if normalized_login_name is not None:
+                    duplicate = connection.execute(
+                        sa.select(platform_accounts.c.id).where(
+                            platform_accounts.c.login_name == normalized_login_name,
+                            platform_accounts.c.id != account_id,
+                        )
+                    ).scalar_one_or_none()
+                    if duplicate is not None:
+                        raise AccountLoginNameTakenError("login_name is already in use")
+                values: dict[str, str | None] = {}
+                if nickname is not None:
+                    values["nickname"] = nickname
+                if normalized_login_name is not None:
+                    values["login_name"] = normalized_login_name
+                if values:
+                    connection.execute(
+                        platform_accounts.update()
+                        .where(platform_accounts.c.id == account_id)
+                        .values(**values)
+                    )
+            account = self.account_for_id(account_id)
+            if account is None:
+                raise KeyError(account_id)
+            return account
+        except IntegrityError as exc:
+            raise AccountLoginNameTakenError("login_name is already in use") from exc
 
     def link_account(self, identity_id: str, account_id: str) -> None:
         with self.engine.begin() as connection:
@@ -333,7 +474,13 @@ class SqlIdentityRepository:
     def accounts_for_identity(self, identity_id: str) -> list[PlatformAccount]:
         with self.engine.begin() as connection:
             rows = connection.execute(
-                sa.select(platform_accounts.c.id, platform_accounts.c.status)
+                sa.select(
+                    platform_accounts.c.id,
+                    platform_accounts.c.status,
+                    platform_accounts.c.account_no,
+                    platform_accounts.c.nickname,
+                    platform_accounts.c.login_name,
+                )
                 .select_from(
                     platform_accounts.join(
                         login_identity_accounts,
@@ -344,7 +491,14 @@ class SqlIdentityRepository:
                 .order_by(platform_accounts.c.id)
             ).mappings()
             return [
-                PlatformAccount(str(row["id"]), AccountStatus(str(row["status"]))) for row in rows
+                PlatformAccount(
+                    str(row["id"]),
+                    AccountStatus(str(row["status"])),
+                    str(row["account_no"] or public_account_no(str(row["id"]))),
+                    str(row["nickname"]) if row["nickname"] is not None else None,
+                    str(row["login_name"]) if row["login_name"] is not None else None,
+                )
+                for row in rows
             ]
 
     def default_account_id(self, identity_id: str) -> str | None:

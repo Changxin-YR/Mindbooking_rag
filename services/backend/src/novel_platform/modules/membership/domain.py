@@ -50,6 +50,8 @@ class MembershipOrder:
     channel: str
     price_cents: int
     status: str
+    provider: str | None = None
+    checkout_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

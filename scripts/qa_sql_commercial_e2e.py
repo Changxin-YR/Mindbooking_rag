@@ -2,12 +2,19 @@
 
 import argparse
 import os
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from time import time
 
-from playwright.sync_api import APIRequestContext, Playwright, sync_playwright
+# Keep the smoke command runnable from a clean checkout without an external
+# PYTHONPATH export.
+_backend_src = Path(__file__).resolve().parents[1] / "services" / "backend" / "src"
+if str(_backend_src) not in sys.path:
+    sys.path.insert(0, str(_backend_src))
 
-from novel_platform.modules.payment import SandboxPaymentProvider, SandboxPayoutProvider
+from novel_platform.modules.payment import build_payment_provider
+from playwright.sync_api import APIRequestContext, sync_playwright
 
 
 def _json(response, expected: int | tuple[int, ...]):
@@ -17,9 +24,10 @@ def _json(response, expected: int | tuple[int, ...]):
 
 
 def _token(api: APIRequestContext, phone: str, password: str) -> str:
-    return _json(api.post("/api/v1/iam/sessions", data={"phone": phone, "password": password}), 200)[
-        "access_token"
-    ]
+    return _json(
+        api.post("/api/v1/iam/sessions", data={"phone": phone, "password": password}),
+        200,
+    )["access_token"]
 
 
 def _staff_token(api: APIRequestContext, employee_code: str, password: str) -> str:
@@ -32,7 +40,52 @@ def _staff_token(api: APIRequestContext, employee_code: str, password: str) -> s
     )["access_token"]
 
 
-def _real_name(api: APIRequestContext, account_id: str, token: str, document: str) -> None:
+def _provision_finance_checker(
+    api: APIRequestContext, bootstrap_headers: dict[str, str], suffix: str
+) -> dict[str, str]:
+    """Create and authorize a distinct finance checker through platform APIs."""
+    employee_code = f"qa-finance-{suffix}"
+    password = "QaFinance#123456"
+    staff = _json(
+        api.post(
+            "/admin/api/v1/platform/staff",
+            headers=bootstrap_headers,
+            data={"employee_code": employee_code, "department": "platform"},
+        ),
+        201,
+    )
+    _json(
+        api.post(
+            f"/admin/api/v1/platform/staff/{staff['id']}/status",
+            headers=bootstrap_headers,
+            data={"status": "ACTIVE"},
+        ),
+        200,
+    )
+    permission_response = api.post(
+        f"/admin/api/v1/platform/staff/{staff['id']}/permissions",
+        headers=bootstrap_headers,
+        data={"permission": "finance.write"},
+    )
+    assert permission_response.status == 204, permission_response.text()
+    scope_response = api.post(
+        f"/admin/api/v1/platform/staff/{staff['id']}/data-scopes",
+        headers=bootstrap_headers,
+        data={"scope_type": "ALL", "scope_value": "*"},
+    )
+    assert scope_response.status == 204, scope_response.text()
+    credential_response = api.post(
+        f"/admin/api/v1/auth/staff/credentials/{staff['id']}",
+        headers=bootstrap_headers,
+        data={"password": password},
+    )
+    assert credential_response.status == 204, credential_response.text()
+    return {"Authorization": f"Bearer {_staff_token(api, employee_code, password)}"}
+
+
+def _real_name(
+    api: APIRequestContext, account_id: str, token: str, document: str
+) -> None:
     _json(
         api.post(
             f"/api/v1/iam/accounts/{account_id}/real-name",
@@ -59,13 +112,18 @@ def _event_payload(event) -> dict[str, object]:
     }
 
 
-def run(api: APIRequestContext, payment_secret: str, staff_code: str, staff_password: str) -> None:
+def run(
+    api: APIRequestContext, payment_secret: str, staff_code: str, staff_password: str
+) -> None:
     suffix = str(int(time() * 1000))[-8:]
     password = "Correct#123"
     author_phone = f"139{suffix}"
     reader_phone = f"138{suffix}"
     author_account = _json(
-        api.post("/api/v1/iam/accounts", data={"phone": author_phone, "password": password}), 201
+        api.post(
+            "/api/v1/iam/accounts", data={"phone": author_phone, "password": password}
+        ),
+        201,
     )["account_id"]
     author_token = _token(api, author_phone, password)
     _real_name(api, author_account, author_token, f"11010119900101{suffix[-3:]}1")
@@ -82,7 +140,11 @@ def run(api: APIRequestContext, payment_secret: str, staff_code: str, staff_pass
         api.post(
             "/writer/api/v1/books",
             headers={"Authorization": f"Bearer {author_token}"},
-            data={"author_id": author_id, "title": f"SQL商业闭环{suffix}", "synopsis": "验收"},
+            data={
+                "author_id": author_id,
+                "title": f"SQL商业闭环{suffix}",
+                "synopsis": "验收",
+            },
         ),
         201,
     )
@@ -130,11 +192,19 @@ def run(api: APIRequestContext, payment_secret: str, staff_code: str, staff_pass
     )
     staff = _staff_token(api, staff_code, staff_password)
     staff_headers = {"Authorization": f"Bearer {staff}"}
+    finance_headers = _provision_finance_checker(api, staff_headers, suffix)
     _json(
         api.post(
             f"/admin/api/v1/finance/contracts/{contract['id']}/approve",
             headers=staff_headers,
             data={"actor_id": "ignored"},
+        ),
+        200,
+    )
+    _json(
+        api.post(
+            f"/writer/api/v1/finance/contracts/{contract['id']}/sign",
+            headers={"Authorization": f"Bearer {author_token}"},
         ),
         200,
     )
@@ -172,26 +242,51 @@ def run(api: APIRequestContext, payment_secret: str, staff_code: str, staff_pass
     )
 
     reader_account = _json(
-        api.post("/api/v1/iam/accounts", data={"phone": reader_phone, "password": password}), 201
+        api.post(
+            "/api/v1/iam/accounts", data={"phone": reader_phone, "password": password}
+        ),
+        201,
     )["account_id"]
     reader_token = _token(api, reader_phone, password)
     _real_name(api, reader_account, reader_token, f"11010119900101{suffix[-3:]}2")
     reader_headers = {"Authorization": f"Bearer {reader_token}"}
-    payment_provider = SandboxPaymentProvider(payment_secret, provider_name="SANDBOX")
+    payment_provider_name = (
+        os.getenv("PAYMENT_PROVIDER", "SANDBOX_ALIPAY").strip().upper()
+    )
+    payment_provider = build_payment_provider(payment_provider_name, payment_secret)
     recharge = _json(
         api.post(
             "/api/v1/recharge",
             headers={**reader_headers, "Idempotency-Key": f"e2e-recharge-{suffix}"},
-            data={"account_id": reader_account, "product_code": "RECHARGE_100", "channel": "SANDBOX"},
+            data={
+                "account_id": reader_account,
+                "product_code": "RECHARGE_100",
+                "channel": payment_provider_name,
+            },
         ),
         200,
     )
     payment_provider.create_checkout(recharge["payment_no"], recharge["paid_cents"])
     payment_event = payment_provider.generate_callback_event(recharge["payment_no"])
-    _json(api.post("/api/v1/recharge/provider-callback", data=_event_payload(payment_event)), 200)
-    _json(api.post("/api/v1/recharge/provider-callback", data=_event_payload(payment_event)), 200)
+    _json(
+        api.post(
+            "/api/v1/recharge/provider-callback", data=_event_payload(payment_event)
+        ),
+        200,
+    )
+    _json(
+        api.post(
+            "/api/v1/recharge/provider-callback", data=_event_payload(payment_event)
+        ),
+        200,
+    )
     balance_before = _json(
-        api.get("/api/v1/wallet", params={"account_id": reader_account}, headers=reader_headers), 200
+        api.get(
+            "/api/v1/wallet",
+            params={"account_id": reader_account},
+            headers=reader_headers,
+        ),
+        200,
     )["total_coin"]
     assert balance_before == 10_000
     purchase = _json(
@@ -212,7 +307,12 @@ def run(api: APIRequestContext, payment_secret: str, staff_code: str, staff_pass
     )
     assert duplicate["purchase_no"] == purchase["purchase_no"]
     balance_after = _json(
-        api.get("/api/v1/wallet", params={"account_id": reader_account}, headers=reader_headers), 200
+        api.get(
+            "/api/v1/wallet",
+            params={"account_id": reader_account},
+            headers=reader_headers,
+        ),
+        200,
     )["total_coin"]
     assert balance_after == 8_500
 
@@ -230,12 +330,21 @@ def run(api: APIRequestContext, payment_secret: str, staff_code: str, staff_pass
         ),
         (200, 201),
     )
-    _json(api.post(f"/admin/api/v1/finance/revenue/{revenue['id']}/confirm", headers=staff_headers), 200)
+    _json(
+        api.post(
+            f"/admin/api/v1/finance/revenue/{revenue['id']}/confirm",
+            headers=staff_headers,
+        ),
+        200,
+    )
     settlement = _json(
         api.post(
             "/admin/api/v1/finance/settlements",
             headers=staff_headers,
-            data={"author_id": author_id, "period": datetime.now(UTC).strftime("%Y-%m")},
+            data={
+                "author_id": author_id,
+                "period": datetime.now(UTC).strftime("%Y-%m"),
+            },
         ),
         201,
     )
@@ -263,19 +372,26 @@ def run(api: APIRequestContext, payment_secret: str, staff_code: str, staff_pass
     payout = _json(
         api.post(
             f"/admin/api/v1/finance/withdrawals/{withdrawal['id']}/finance-approve",
-            headers=staff_headers,
+            headers=finance_headers,
             data={"actor_id": "ignored"},
         ),
         200,
     )
-    payout_provider = SandboxPayoutProvider(payment_secret, provider_name="SANDBOX_PAYOUT")
-    payout_provider.create_payout(
-        payout["payout_no"], payout["amount_cents"], payout["currency"], payout["destination"]
+    payout_simulation = _json(
+        api.post(
+            "/api/v1/payouts/sandbox/simulate",
+            headers=staff_headers,
+            data={
+                "payout_no": payout["payout_no"],
+                "status": "SUCCESS",
+                "duplicate": True,
+            },
+        ),
+        200,
     )
-    payout_event = payout_provider.generate_callback_event(payout["payout_no"])
-    _json(api.post("/api/v1/payouts/provider-callback", data=_event_payload(payout_event)), 200)
-    _json(api.post("/api/v1/payouts/provider-callback", data=_event_payload(payout_event)), 200)
-    assert payment_event.provider == "SANDBOX"
+    assert payout_simulation["status"] == "SUCCESS"
+    assert payout_simulation["processed"] is True
+    assert payment_event.provider == payment_provider_name
     print(
         f"sql commercial e2e: ok account={reader_account} chapter={chapter_id} "
         f"purchase={purchase['purchase_no']} payout={payout['payout_no']}"
@@ -284,10 +400,22 @@ def run(api: APIRequestContext, payment_secret: str, staff_code: str, staff_pass
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api", default=os.getenv("API_BASE_URL", "http://127.0.0.1:8000"))
-    parser.add_argument("--payment-secret", default=os.getenv("PAYMENT_CALLBACK_SECRET", "development-only-payment-callback-secret"))
-    parser.add_argument("--staff-code", default=os.getenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "qa-admin"))
-    parser.add_argument("--staff-password", default=os.getenv("STAFF_BOOTSTRAP_PASSWORD", "QaAdmin#123456"))
+    parser.add_argument(
+        "--api", default=os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
+    )
+    parser.add_argument(
+        "--payment-secret",
+        default=os.getenv(
+            "PAYMENT_CALLBACK_SECRET", "development-only-payment-callback-secret"
+        ),
+    )
+    parser.add_argument(
+        "--staff-code", default=os.getenv("STAFF_BOOTSTRAP_EMPLOYEE_CODE", "qa-admin")
+    )
+    parser.add_argument(
+        "--staff-password",
+        default=os.getenv("STAFF_BOOTSTRAP_PASSWORD", "QaAdmin#123456"),
+    )
     args = parser.parse_args()
     with sync_playwright() as playwright:
         api = playwright.request.new_context(base_url=args.api.rstrip("/"))

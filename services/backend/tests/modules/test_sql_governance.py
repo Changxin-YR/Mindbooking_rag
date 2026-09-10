@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import sqlalchemy as sa
 from sqlalchemy import create_engine
 
@@ -45,6 +47,11 @@ def _engine() -> sa.Engine:
         sa.Column("account_id", sa.String(64), nullable=False),
         sa.Column("amount_cents", sa.BigInteger, nullable=False),
         sa.Column("status", sa.String(24), nullable=False),
+        sa.Column("attempts", sa.Integer, nullable=False, default=0),
+        sa.Column("last_error", sa.Text),
+        sa.Column("last_attempted_at", sa.DateTime),
+        sa.Column("resolved_at", sa.DateTime),
+        sa.Column("repair_actor_id", sa.String(64)),
         sa.Column("created_at", sa.DateTime, nullable=False),
     )
     sa.Table(
@@ -122,3 +129,54 @@ def test_sql_governance_reloads_idempotent_parameter_outbox_and_invoice_facts() 
     assert rebuilt.reconciliation_batch(batch.id).items[0].amount_cents == 10
     assert rebuilt._parameters[parameter.id].status.value == "ACTIVE"
     assert rebuilt._invoices[invoice.id].status == "APPLIED"
+
+
+def test_sql_reconciliation_batch_lifecycle_is_persisted_and_idempotent() -> None:
+    engine = _engine()
+    service = SqlGovernanceService(engine)
+    batch = service.open_reconciliation("2026-09-05")
+    assert service.mark_reconciliation_repaired(batch.id, "finance-1").status.value == "REPAIRED"
+    assert service.close_reconciliation(batch.id, "finance-2").status.value == "CLOSED"
+    rebuilt = SqlGovernanceService(engine)
+    assert rebuilt.close_reconciliation(batch.id, "finance-3").status.value == "CLOSED"
+    assert rebuilt.list_reconciliation_batches()[0].id == batch.id
+
+
+def test_sql_credit_pending_repair_persists_success_and_failure_states() -> None:
+    engine = _engine()
+    service = SqlGovernanceService(engine)
+    first = service.record_payment_credit_failure("pay-ok", "acct-1", 1000)
+    calls: list[str] = []
+    service.repair_payment_credit = lambda payment_id: calls.append(payment_id) or True
+
+    repaired = service.retry_payment_credit(first.payment_id, "staff-1")
+    assert repaired.status == "RESOLVED"
+    assert repaired.attempts == 1
+    assert calls == ["pay-ok"]
+    assert SqlGovernanceService(engine).list_payment_credit_pending("RESOLVED")[0].resolved_at
+
+    failed = service.record_payment_credit_failure("pay-fail", "acct-1", 1000)
+    service.repair_payment_credit = lambda _: (_ for _ in ()).throw(RuntimeError("wallet down"))
+    failed = service.retry_payment_credit(failed.payment_id, "staff-2")
+    assert failed.status == "REPAIR_REQUIRED"
+    assert failed.last_error == "wallet down"
+    assert service.list_payment_credit_pending()[0].payment_id == "pay-fail"
+
+
+def test_sql_credit_pending_stale_repairing_record_can_be_reclaimed() -> None:
+    engine = _engine()
+    service = SqlGovernanceService(engine)
+    pending = service.record_payment_credit_failure("pay-stale", "acct-1", 1000)
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "UPDATE payment_credit_pending SET status='REPAIRING', "
+                "last_attempted_at=:at WHERE payment_id=:payment_id"
+            ),
+            {"at": datetime.now(UTC) - timedelta(minutes=10), "payment_id": pending.payment_id},
+        )
+    service.repair_payment_credit = lambda _: True
+
+    repaired = service.retry_payment_credit(pending.payment_id, "staff-reclaim")
+    assert repaired.status == "RESOLVED"
+    assert repaired.attempts == 1

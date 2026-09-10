@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from novel_platform.main import create_app
 from novel_platform.modules.membership.api import build_membership_router
+from novel_platform.modules.payment import SandboxPaymentProvider
 
 
 def test_membership_status_requires_account_session_and_returns_state() -> None:
@@ -82,3 +83,37 @@ def test_membership_admin_payload_name_is_forwarded_without_invoke_collision(mon
     assert gift.status_code == 201, gift.text
     assert gift.json()["name"] == "测试明灯"
     assert service.gift["name"] == "测试明灯"
+
+
+def test_membership_sandbox_simulation_routes_provider_events_and_checks_owner() -> None:
+    class MembershipRecorder:
+        def __init__(self) -> None:
+            self.payment_provider = SandboxPaymentProvider("test-secret", provider_name="SANDBOX")
+            self.events: list[object] = []
+
+        def payment_details(self, payment_no: str) -> tuple[str, int]:
+            assert payment_no == "MPAY-1"
+            return "account-1", 999
+
+        def handle_payment_provider_event(self, event, **kwargs) -> str:
+            self.events.append(event)
+            return "order-1"
+
+    service = MembershipRecorder()
+    app = FastAPI()
+    app.include_router(build_membership_router(service))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/membership/payments/sandbox/simulate",
+        json={"account_id": "account-1", "payment_no": "MPAY-1", "duplicate": True},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["order_id"] == "order-1"
+    assert len(service.events) == 2
+
+    forbidden = client.post(
+        "/api/v1/membership/payments/sandbox/simulate",
+        json={"account_id": "account-2", "payment_no": "MPAY-1"},
+    )
+    assert forbidden.status_code == 403

@@ -5,10 +5,13 @@ from novel_platform.core.auth import SessionClaims
 from novel_platform.core.http_auth import optional_session, require_account_access, require_session
 from novel_platform.modules.iam.application import (
     AccountAlreadyRealNamedError,
+    AccountLoginNameTakenError,
     AccountNotFoundError,
     IdentityApplication,
     IdentityNotFoundError,
     InvalidCredentialsError,
+    InvalidLoginNameError,
+    InvalidNicknameError,
     RealNameSlotLimitError,
 )
 from novel_platform.modules.iam.domain import InvalidIdentityDocumentError, InvalidPhoneError
@@ -50,11 +53,32 @@ class AccountResponse(BaseModel):
     phone: str
 
 
+class AccountProfileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    account_no: str
+    status: str
+    nickname: str | None = None
+    login_name: str | None = None
+    phone: str | None = None
+
+
+class UpdateAccountProfileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    nickname: str | None = Field(default=None, min_length=1, max_length=32)
+    login_name: str | None = Field(default=None, min_length=3, max_length=32)
+
+
 class AccountSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     account_id: str
     status: str
+    account_no: str
+    nickname: str | None = None
+    login_name: str | None = None
 
 
 class PhoneAccountsResponse(BaseModel):
@@ -101,7 +125,9 @@ def build_iam_router(application: IdentityApplication, *, auth_required: bool = 
                 detail={"code": "INVALID_PHONE", "message": str(exc)},
             ) from exc
         return AccountResponse(
-            account_id=result.account_id, identity_id=result.identity_id, phone=result.phone
+            account_id=result.account_id,
+            identity_id=result.identity_id,
+            phone=result.phone,
         )
 
     @router.post("/iam/sessions", response_model=SessionResponse)
@@ -168,9 +194,88 @@ def build_iam_router(application: IdentityApplication, *, auth_required: bool = 
             phone=identity.normalized_value,
             default_account_id=default_account.id,
             accounts=[
-                AccountSummary(account_id=account.id, status=account.status.value)
+                AccountSummary(
+                    account_id=account.id,
+                    status=account.status.value,
+                    account_no=account.account_no,
+                    nickname=account.nickname,
+                    login_name=account.login_name,
+                )
                 for account in accounts
             ],
+        )
+
+    def account_profile_response(account_id: str) -> AccountProfileResponse:
+        account = application.profile_for_account(account_id)
+        return AccountProfileResponse(
+            account_id=account.id,
+            account_no=account.account_no,
+            status=account.status.value,
+            nickname=account.nickname,
+            login_name=account.login_name,
+            phone=application.phone_for_account(account_id),
+        )
+
+    @router.get(
+        "/iam/accounts/{account_id}/profile",
+        response_model=AccountProfileResponse,
+        operation_id="get_account_profile",
+    )
+    def get_account_profile(
+        account_id: str,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> AccountProfileResponse:
+        require_account_access(session, account_id, required=auth_required)
+        try:
+            return account_profile_response(account_id)
+        except AccountNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail={"code": "ACCOUNT_NOT_FOUND", "message": str(exc)},
+            ) from exc
+
+    @router.patch(
+        "/iam/accounts/{account_id}/profile",
+        response_model=AccountProfileResponse,
+        operation_id="update_account_profile",
+    )
+    def update_account_profile(
+        account_id: str,
+        payload: UpdateAccountProfileRequest,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> AccountProfileResponse:
+        require_account_access(session, account_id, required=auth_required)
+        if payload.nickname is None and payload.login_name is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "PROFILE_UPDATE_EMPTY", "message": "profile update is empty"},
+            )
+        try:
+            account = application.update_profile(
+                account_id, nickname=payload.nickname, login_name=payload.login_name
+            )
+        except AccountNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail={"code": "ACCOUNT_NOT_FOUND", "message": str(exc)},
+            ) from exc
+        except (InvalidNicknameError, InvalidLoginNameError) as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "INVALID_PROFILE", "message": str(exc)},
+            ) from exc
+        except AccountLoginNameTakenError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={"code": "LOGIN_NAME_TAKEN", "message": str(exc)},
+            ) from exc
+        return AccountProfileResponse(
+            account_id=account.id,
+            account_no=account.account_no,
+            status=account.status.value,
+            nickname=account.nickname,
+            login_name=account.login_name,
+            phone=application.phone_for_account(account_id),
         )
 
     @router.post("/iam/identities/phone/{phone}/route", status_code=status.HTTP_204_NO_CONTENT)
@@ -223,5 +328,21 @@ def build_iam_router(application: IdentityApplication, *, auth_required: bool = 
                 detail={"code": "ACCOUNT_ALREADY_REAL_NAMED", "message": str(exc)},
             ) from exc
         return RealNameResponse(account_id=link.account_id, slot_status=link.slot_status.value)
+
+    @router.get(
+        "/iam/accounts/{account_id}/real-name",
+        response_model=RealNameResponse,
+        operation_id="get_real_name_status",
+    )
+    def real_name_status(
+        account_id: str,
+        session: SessionClaims | None = Depends(optional_session),
+    ) -> RealNameResponse:
+        require_account_access(session, account_id, required=auth_required)
+        link = application.repository.real_name_link_for_account(account_id)
+        return RealNameResponse(
+            account_id=account_id,
+            slot_status=link.slot_status.value if link is not None else "NOT_VERIFIED",
+        )
 
     return router
