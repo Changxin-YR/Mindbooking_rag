@@ -149,7 +149,7 @@ services:
       context: ..
       dockerfile: infra/docker/reader.Dockerfile
       args:
-        NUXT_PUBLIC_API_BASE_URL: ${NUXT_PUBLIC_API_BASE_URL:-${BOOKS_API_BASE_URL:-http://localhost:8000}}
+        NUXT_PUBLIC_API_BASE_URL: ${NUXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
         NUXT_APP_BASE_URL: ${NUXT_APP_BASE_URL:-/}
     profiles: [apps]
     healthcheck:
@@ -163,7 +163,7 @@ services:
       context: ..
       dockerfile: infra/docker/writer.Dockerfile
       args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-${BOOKS_API_BASE_URL:-http://localhost:8000}}
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
         VITE_APP_BASE: ${VITE_APP_BASE:-/writer/}
     profiles: [apps]
     healthcheck:
@@ -177,7 +177,7 @@ services:
       context: ..
       dockerfile: infra/docker/admin.Dockerfile
       args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-${BOOKS_API_BASE_URL:-http://localhost:8000}}
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
         VITE_APP_BASE: ${VITE_ADMIN_APP_BASE:-/admin/}
     profiles: [apps]
     healthcheck:
@@ -202,6 +202,8 @@ services:
       HARNESS_BRIDGE_SECRET: ${DEEPSEEK_HARNESS_WEB_BRIDGE_SECRET:-development-only-harness-bridge-secret}
       HARNESS_BACKEND_URL: ${HARNESS_BACKEND_URL:-http://backend:80}
       HARNESS_IDLE_TIMEOUT_SECONDS: ${HARNESS_IDLE_TIMEOUT_SECONDS:-300}
+      HARNESS_PORT_START: ${HARNESS_PORT_START:-3081}
+      HARNESS_PORT_END: ${HARNESS_PORT_END:-3180}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
       DEEPSEEK_PROVIDER: ${DEEPSEEK_PROVIDER:-deepseek-official}
@@ -213,7 +215,7 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "${HARNESS_WEB_PORT_RANGE:-127.0.0.1:3080-3180}:3080-3180"
+      - "${HARNESS_WEB_PORT_RANGE:-127.0.0.1:3081-3180}:3081-3180"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
