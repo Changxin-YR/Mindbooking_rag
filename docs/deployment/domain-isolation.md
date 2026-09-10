@@ -16,7 +16,7 @@ docker compose --env-file .env -f infra/docker-compose.yml --profile apps up -d 
 docker compose --env-file .env -f infra/docker-compose.yml exec backend alembic upgrade head
 ```
 
-生产 `.env` 至少设置 `COMPOSE_PROJECT_NAME=novel-platform-books`、`BOOKS_PUBLIC_HOST=23331.cloud`、`BOOKS_API_BASE_URL=https://23331.cloud/books`，并让 `MYSQL_PORT`、`API_PORT`、`NGINX_HTTP_PORT` 使用 `127.0.0.1:端口` 形式。不要把 `.env` 提交 Git。
+本地 `.env.example` 默认使用 `localhost` 和回环端口。生产 `.env` 才设置 `COMPOSE_PROJECT_NAME=novel-platform-books`、`BOOKS_PUBLIC_HOST=23331.cloud`、`BOOKS_API_BASE_URL=https://23331.cloud/books`，并让 `MYSQL_PORT`、`API_PORT`、`NGINX_HTTP_PORT` 使用 `127.0.0.1:端口` 形式。不要把生产 `.env` 提交 Git。
 
 外层 Nginx 使用独立配置文件，仅将 `/books/` 及其 API、Writer、Admin 子路径代理到 `127.0.0.1:18080`；根路径和其他项目路径返回明确的重定向或 404。项目网关同时拒绝未列入白名单的 Host。
 
